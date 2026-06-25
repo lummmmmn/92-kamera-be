@@ -36,9 +36,11 @@ async function readSeed(): Promise<JsonDb> {
       [STORE_KEYS.accessories]: seed.accessories,
       [STORE_KEYS.site]: seed.site,
       [STORE_KEYS.feedbacks]: seed.feedbacks,
+      [STORE_KEYS.users]: seed.users,
       [STORE_KEYS.discounts]: seed.discounts,
       [STORE_KEYS.albums]: seed.albums,
       [STORE_KEYS.deliveryFees]: seed.deliveryFees,
+      [STORE_KEYS.orders]: seed.orders,
     };
 
     for (const [key, value] of Object.entries(seedMap)) {

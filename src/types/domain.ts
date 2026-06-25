@@ -131,3 +131,15 @@ export type PricingBreakdown = {
   total: number;
   appliedDiscounts: AppliedDiscount[];
 };
+
+export type User = {
+  googleId: string;
+  email?: string;
+  name?: string;
+  avatar?: string;
+  phone?: string;
+  provider?: "google";
+  createdAt?: string;
+  updatedAt?: string;
+  [key: string]: unknown;
+};

@@ -43,25 +43,49 @@ export function createAdminToken(): string {
   return `${payload}.${sign(payload)}`;
 }
 
-export function verifyAdminToken(token: string): boolean {
-  if (!token || !token.includes(".")) return false;
+export function createCustomerToken(userId: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64Url(
+    JSON.stringify({
+      sub: userId,
+      role: "customer",
+      iat: now,
+      exp: now + env.adminSessionTtlSeconds,
+    }),
+  );
+
+  return `${payload}.${sign(payload)}`;
+}
+
+export interface TokenPayload {
+  sub: string;
+  role?: string;
+  iat: number;
+  exp: number;
+}
+
+export function verifyToken(token: string): TokenPayload | null {
+  if (!token || !token.includes(".")) return null;
 
   const [payload, signature] = token.split(".");
-  if (!payload || !signature) return false;
+  if (!payload || !signature) return null;
 
   const expected = sign(payload);
   const signatureBuffer = Buffer.from(signature);
   const expectedBuffer = Buffer.from(expected);
-  if (signatureBuffer.length !== expectedBuffer.length) return false;
-  if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return false;
+  if (signatureBuffer.length !== expectedBuffer.length) return null;
+  if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
 
   try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
-      sub?: unknown;
-      exp?: unknown;
-    };
-    return data.sub === "admin" && Number(data.exp) > Math.floor(Date.now() / 1000);
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as TokenPayload;
+    if (Number(data.exp) <= Math.floor(Date.now() / 1000)) return null;
+    return data;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function verifyAdminToken(token: string): boolean {
+  const payload = verifyToken(token);
+  return payload !== null && payload.sub === "admin";
 }

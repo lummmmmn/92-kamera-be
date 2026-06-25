@@ -6,3 +6,5 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 export const authRouter = Router();
 
 authRouter.post("/login", loginRateLimit(), asyncHandler(authController.login));
+authRouter.post("/google", loginRateLimit(), asyncHandler(authController.google));
+authRouter.post("/logout", asyncHandler(authController.logout));

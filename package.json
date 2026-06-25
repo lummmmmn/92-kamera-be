@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "nodemon --watch src --ext ts,json --signal SIGINT --exec tsx src/server.ts",
+    "seed": "tsx src/scripts/seed.ts",
+    "seed:dist": "node dist/scripts/seed.js",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"
@@ -21,6 +23,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.15",
+    "nodemon": "^3.1.14",
     "tsx": "^4.16.5",
     "typescript": "^5.5.4"
   },

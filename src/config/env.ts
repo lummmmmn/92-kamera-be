@@ -28,4 +28,5 @@ export const env = {
   adminSessionTtlSeconds: intFromEnv("ADMIN_SESSION_TTL_SECONDS", 60 * 60 * 12),
   loginWindowMs: intFromEnv("LOGIN_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000),
   loginMaxAttempts: intFromEnv("LOGIN_RATE_LIMIT_MAX", 30),
+  googleClientId: process.env.GOOGLE_CLIENT_ID || "",
 };

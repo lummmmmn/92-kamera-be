@@ -1,8 +1,10 @@
+import dns from "node:dns";
 import { MongoClient, type Collection, type Db } from "mongodb";
 import type { GalleryPhoto, GalleryPhotoInput, Repository } from "../types/repository.js";
 
 let clientPromise: Promise<MongoClient> | null = null;
 let indexesReady = false;
+let dnsConfigured = false;
 
 type AnyDoc = {
   _id: any;
@@ -16,6 +18,7 @@ const MAPPED_COLLECTIONS: Record<string, string> = {
   k92_feedbacks_v1: "feedbacks",
   k92_discounts_v1: "discounts",
   k92_albums_v1: "albums",
+  k92_users_v1: "users",
 };
 
 type MongoConfig = {
@@ -41,6 +44,15 @@ function requireConfig(): MongoConfig {
 
 async function getClient(uri: string): Promise<MongoClient> {
   if (!clientPromise) {
+    const dnsServers = (process.env.MONGODB_DNS_SERVERS || "")
+      .split(",")
+      .map((server) => server.trim())
+      .filter(Boolean);
+    if (!dnsConfigured && uri.startsWith("mongodb+srv://") && dnsServers.length > 0) {
+      dns.setServers(dnsServers);
+      dnsConfigured = true;
+    }
+
     const client = new MongoClient(uri, {
       maxPoolSize: Number(process.env.MONGODB_MAX_POOL_SIZE || 10),
       serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 8000),
@@ -60,16 +72,30 @@ async function getCollectionArray(db: Db, colName: string): Promise<unknown[]> {
 }
 
 async function saveCollectionArray(db: Db, colName: string, value: unknown): Promise<void> {
-  if (!Array.isArray(value)) return;
+  let items: unknown[] = [];
+  if (Array.isArray(value)) {
+    items = value;
+  } else if (value && typeof value === "object") {
+    items = Object.entries(value).map(([key, val]) => {
+      if (val && typeof val === "object") {
+        const itemObj = val as Record<string, unknown>;
+        const itemId = itemObj.googleId || itemObj.id || key;
+        return { ...itemObj, id: itemId };
+      }
+      return null;
+    }).filter(Boolean);
+  } else {
+    return;
+  }
 
   const col = db.collection<AnyDoc>(colName);
-  const ids = value
+  const ids = items
     .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).id : undefined))
     .filter((id) => id !== undefined && id !== null);
 
   await col.deleteMany({ _id: { $nin: ids } } as any);
 
-  for (const item of value) {
+  for (const item of items) {
     if (!item || typeof item !== "object") continue;
     const { id, ...doc } = item as Record<string, unknown>;
     if (id === undefined || id === null) continue;
