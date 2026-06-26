@@ -8,7 +8,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "https://92kamera-fe.vercel.app",
-  "https://www.92kamera.com/"
+  "https://92kamera.com",
+  "https://www.92kamera.com",
 ];
 
 function normalizeOrigin(origin: string): string {
