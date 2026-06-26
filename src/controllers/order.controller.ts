@@ -340,7 +340,22 @@ export const orderController = {
     if (!isPublicCancellation(current, body)) requireAdmin(req);
 
     const nextOrder = normalizeLegacyOrder({ ...current, ...body, id }, orders, current);
-    await validateLegacyAvailability(repo, nextOrder, orders);
+
+    // Only validate availability if dates, session, cameras or accessories have changed,
+    // or if the order is being reactivated (status changed from inactive to active).
+    const isReactivated = !ACTIVE_ORDER_STATUSES.has(current.status) && ACTIVE_ORDER_STATUSES.has(nextOrder.status);
+    const dateChanged = current.date !== nextOrder.date;
+    const daysChanged = current.days !== nextOrder.days;
+    const sessionChanged = current.session !== nextOrder.session;
+    const camerasChanged = JSON.stringify(current.cameras || []) !== JSON.stringify(nextOrder.cameras || []) ||
+                           current.cameraId !== nextOrder.cameraId ||
+                           current.cameraName !== nextOrder.cameraName;
+    const accessoriesChanged = JSON.stringify(current.accessories || []) !== JSON.stringify(nextOrder.accessories || []) ||
+                               JSON.stringify(current.accessoriesDetail || []) !== JSON.stringify(nextOrder.accessoriesDetail || []);
+
+    if (isReactivated || dateChanged || daysChanged || sessionChanged || camerasChanged || accessoriesChanged) {
+      await validateLegacyAvailability(repo, nextOrder, orders);
+    }
 
     const nextOrders = orders.map((item) => (item.id === id ? nextOrder : item));
     await setResourceArray(repo, STORE_KEYS.orders, nextOrders as unknown as KvRecord[]);
