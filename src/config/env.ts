@@ -29,4 +29,7 @@ export const env = {
   loginWindowMs: intFromEnv("LOGIN_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000),
   loginMaxAttempts: intFromEnv("LOGIN_RATE_LIMIT_MAX", 30),
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || "",
+  cloudinaryUploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || "",
 };

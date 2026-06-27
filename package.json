@@ -7,6 +7,7 @@
     "dev": "nodemon --watch src --ext ts,json --signal SIGINT --exec tsx src/server.ts",
     "seed": "tsx src/scripts/seed.ts",
     "seed:dist": "node dist/scripts/seed.js",
+    "migrate:purge-base64": "tsx src/scripts/migrate-purge-base64-photos.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"

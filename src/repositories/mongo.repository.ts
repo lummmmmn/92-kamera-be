@@ -256,7 +256,11 @@ export function createMongoRepository(): Repository {
     async listPhotos(limitCount = 200) {
       const { photos } = await getDb();
       const rows = (await photos
-        .find({}, { projection: { public_id: 1, url: 1, uploaded_at: 1, uploaded_by: 1 } })
+        .find(
+          // Chỉ lấy ảnh có Cloudinary URL thật, bỏ qua base64 data URL
+          { url: { $not: /^data:/ } },
+          { projection: { public_id: 1, url: 1, uploaded_at: 1, uploaded_by: 1 } }
+        )
         .sort({ uploaded_at: -1 })
         .limit(limitCount)
         .toArray()) as unknown as Array<{

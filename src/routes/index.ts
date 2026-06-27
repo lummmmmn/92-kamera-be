@@ -18,11 +18,13 @@ import { galleryRouter } from "./gallery.routes.js";
 import { healthRouter } from "./health.routes.js";
 import { pricingRouter } from "./pricing.routes.js";
 import { storageRouter } from "./storage.routes.js";
+import { uploadRouter } from "./upload.routes.js";
 
 export const apiRouter = Router();
 
 apiRouter.use("/health", healthRouter);
 apiRouter.use("/auth", authRouter);
+apiRouter.use("/upload", uploadRouter);
 apiRouter.use("/storage", storageRouter);
 apiRouter.use("/gallery", galleryRouter);
 apiRouter.use("/catalog", catalogRouter);
