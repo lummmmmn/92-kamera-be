@@ -159,11 +159,11 @@ export function createJsonRepository(): Repository {
       return { ok: true, updatedAt: nextUpdatedAt };
     },
 
-    async listPhotos(limitCount = 200) {
+    async listPhotos(limitCount = 200, offsetCount = 0) {
       const data = await load();
       return Object.values(data.gallery_photos || {})
         .sort((a, b) => String(b.uploaded_at || "").localeCompare(String(a.uploaded_at || "")))
-        .slice(0, limitCount)
+        .slice(offsetCount, offsetCount + limitCount)
         .map(mapPhoto);
     },
 

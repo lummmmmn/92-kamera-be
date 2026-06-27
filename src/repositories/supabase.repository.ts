@@ -93,12 +93,12 @@ export function createSupabaseRepository(): Repository {
       return { ok, updatedAt: ok ? nextUpdatedAt : expectedUpdatedAt };
     },
 
-    async listPhotos(limitCount = 200) {
+    async listPhotos(limitCount = 200, offsetCount = 0) {
       const { data, error } = await client
         .from("gallery_photos")
         .select("public_id,url,uploaded_at,uploaded_by")
         .order("uploaded_at", { ascending: false })
-        .limit(limitCount);
+        .range(offsetCount, offsetCount + limitCount - 1);
       if (error) throw error;
       return (data || []).map(mapPhoto);
     },

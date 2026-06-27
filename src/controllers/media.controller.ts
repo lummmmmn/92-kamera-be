@@ -3,7 +3,7 @@ import { requireAdmin } from "../middleware/auth.js";
 import { photoSchema, validateModelInput } from "../models/index.js";
 import { getRepository } from "../repositories/index.js";
 import { getResourceById, updateResource, type KvRecord } from "../services/kvResource.service.js";
-import { parseLimit, requireString } from "../utils/http.js";
+import { parseLimit, parseOffset, requireString } from "../utils/http.js";
 import { HttpError } from "../utils/httpError.js";
 import { resources } from "./resource.controller.js";
 
@@ -132,10 +132,11 @@ async function photoPayload(req: Request, defaultFolder: string): Promise<KvReco
 export const photoController = {
   async list(req: Request, res: Response) {
     const limit = parseLimit(req.query.limit, 200, 500);
+    const offset = parseOffset(req.query.offset, 0, 1000000);
     const repo = await getRepository();
-    const photos = await repo.listPhotos(limit);
+    const photos = await repo.listPhotos(limit, offset);
 
-    res.json({ ok: true, photos });
+    res.json({ ok: true, photos, page: { limit, offset, hasMore: photos.length === limit } });
   },
 
   async upload(req: Request, res: Response) {

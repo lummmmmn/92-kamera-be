@@ -39,7 +39,7 @@ export interface Repository {
   getKv(keyName: string): Promise<KvRow>;
   setKv(keyName: string, value: string, updatedAt?: string): Promise<{ ok: true; updatedAt: string }>;
   casKv(keyName: string, value: string, expectedUpdatedAt?: string | null): Promise<CasResult>;
-  listPhotos(limitCount?: number): Promise<GalleryPhoto[]>;
+  listPhotos(limitCount?: number, offsetCount?: number): Promise<GalleryPhoto[]>;
   upsertPhoto(photo: GalleryPhotoInput): Promise<GalleryPhoto>;
   deletePhoto(publicId: string): Promise<{ ok: true }>;
 }

@@ -28,6 +28,7 @@ import {
 } from "../services/kvResource.service.js";
 import { findUserByGoogleId, getUsersMap, upsertUsers } from "../services/userResource.service.js";
 import { HttpError } from "../utils/httpError.js";
+import { parseLimit, parseOffset } from "../utils/http.js";
 
 type NamedResourceConfig = ResourceConfig & {
   plural: string;
@@ -105,9 +106,12 @@ function validateResourceBody(config: NamedResourceConfig, value: unknown, parti
 export function createArrayResourceController(config: NamedResourceConfig) {
   return {
     async list(_req: Request, res: Response) {
+      const limit = parseLimit(_req.query.limit, 200, 500);
+      const offset = parseOffset(_req.query.offset, 0, 1000000);
       const repo = await getRepository();
       const items = await getResourceArray(repo, config.key);
-      res.json(items);
+      const pageItems = items.slice(offset, offset + limit);
+      res.json({ ok: true, items: pageItems, page: { limit, offset, hasMore: pageItems.length === limit } });
     },
 
     async getOne(req: Request, res: Response) {

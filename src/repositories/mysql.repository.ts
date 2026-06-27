@@ -143,16 +143,16 @@ export function createMysqlRepository(): Repository {
       return { ok: false, updatedAt: current.updatedAt || expectedUpdatedAt };
     },
 
-    async listPhotos(limitCount = 200) {
+    async listPhotos(limitCount = 200, offsetCount = 0) {
       const db = await getPool();
       const [rows] = await db.execute<PhotoPacket[]>(
         `
           SELECT public_id, url, uploaded_at, uploaded_by
           FROM gallery_photos
           ORDER BY uploaded_at DESC
-          LIMIT ?
+          LIMIT ? OFFSET ?
         `,
-        [limitCount],
+        [limitCount, offsetCount],
       );
       return rows.map(mapPhoto);
     },

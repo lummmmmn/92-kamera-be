@@ -253,7 +253,7 @@ export function createMongoRepository(): Repository {
       return { ok: false, updatedAt: current.updatedAt || expectedUpdatedAt };
     },
 
-    async listPhotos(limitCount = 200) {
+    async listPhotos(limitCount = 200, offsetCount = 0) {
       const { photos } = await getDb();
       const rows = (await photos
         .find(
@@ -262,6 +262,7 @@ export function createMongoRepository(): Repository {
           { projection: { public_id: 1, url: 1, uploaded_at: 1, uploaded_by: 1 } }
         )
         .sort({ uploaded_at: -1 })
+        .skip(offsetCount)
         .limit(limitCount)
         .toArray()) as unknown as Array<{
         public_id: string;
