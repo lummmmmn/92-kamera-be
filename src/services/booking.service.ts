@@ -4,12 +4,26 @@ import type {
   BookingOrder,
   BookingRequest,
   Camera,
+  CaSlot,
   Discount,
   Id,
   PricingBreakdown,
 } from "../types/domain.js";
 import type { Repository } from "../types/repository.js";
-import { dateAddDays, getDateRange, getOrderSession, isDateInOrder, sessionsConflict, todayStr } from "../utils/date.js";
+import {
+  checkTrungCa,
+  countCa,
+  dateAddDays,
+  getDateRange,
+  getOrderSession,
+  isDateInOrder,
+  parseHour,
+  sessionsConflict,
+  tinhCaKhoa,
+  tinhTienTheoCa,
+  todayStr,
+  validateGioNhanTra,
+} from "../utils/date.js";
 import { HttpError } from "../utils/httpError.js";
 import { getCatalogData } from "./catalog.service.js";
 import { applyDiscounts, calculateSubtotal, pricingInternals, resolveDeliveryFee } from "./pricing.service.js";
@@ -17,6 +31,8 @@ import { arrayOrEmpty, casJsonValue, getJsonValue, getJsonValueWithMeta } from "
 
 const ACTIVE_ORDER_STATUSES = new Set(["pending", "confirmed", "active"]);
 const ALLOWED_STATUS = new Set(["pending", "confirmed", "active", "completed", "cancelled"]);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function normalizeSession(value: unknown): "morning" | "afternoon" | "full" {
   return value === "morning" || value === "afternoon" || value === "full" ? value : "full";
@@ -45,7 +61,45 @@ function requireCustomer(request: BookingRequest): Required<NonNullable<BookingR
   };
 }
 
-function requireRental(request: BookingRequest): { date: string; days: number; session: "morning" | "afternoon" | "full" } {
+// Detect xem request dùng hệ ca mới hay legacy session
+function isCaBasedRequest(request: BookingRequest): boolean {
+  return !!(request.rental?.ngayNhan && request.rental?.gioNhan && request.rental?.gioTra && request.rental?.soNgay);
+}
+
+// Parse rental info từ ca-based request
+function requireRentalCa(request: BookingRequest): {
+  ngayNhan: string;
+  gioNhan: string;
+  gioTra: string;
+  soNgay: number;
+} {
+  const rental = request.rental || {};
+  const ngayNhan = typeof rental.ngayNhan === "string" ? rental.ngayNhan : "";
+  const gioNhan  = typeof rental.gioNhan  === "string" ? rental.gioNhan  : "";
+  const gioTra   = typeof rental.gioTra   === "string" ? rental.gioTra   : "";
+  const soNgay   = Number(rental.soNgay);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ngayNhan)) throw new HttpError(400, "rental.ngayNhan must be YYYY-MM-DD");
+  if (ngayNhan < todayStr()) throw new HttpError(400, "rental.ngayNhan cannot be in the past");
+  if (!/^\d{2}:\d{2}$/.test(gioNhan)) throw new HttpError(400, "rental.gioNhan must be HH:MM");
+  if (!/^\d{2}:\d{2}$/.test(gioTra))  throw new HttpError(400, "rental.gioTra must be HH:MM");
+  if (!Number.isFinite(soNgay) || soNgay < 1) throw new HttpError(400, "rental.soNgay must be >= 1");
+
+  try {
+    validateGioNhanTra(gioNhan, gioTra, soNgay);
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+
+  return { ngayNhan, gioNhan, gioTra, soNgay };
+}
+
+// Parse rental info từ legacy request (giữ nguyên để không break)
+function requireRentalLegacy(request: BookingRequest): {
+  date: string;
+  days: number;
+  session: "morning" | "afternoon" | "full";
+} {
   const date = typeof request.rental?.date === "string" ? request.rental.date : "";
   const days = Number(request.rental?.days);
   const session = normalizeSession(request.rental?.session);
@@ -86,7 +140,6 @@ function usedCameraQty(order: BookingOrder, cameraId: Id): number {
     const item = order.cameras.find((camera) => pricingInternals.sameId(camera.id, cameraId));
     return item?.qty || 0;
   }
-
   return order.cameraId !== undefined && pricingInternals.sameId(order.cameraId, cameraId) ? 1 : 0;
 }
 
@@ -95,11 +148,9 @@ function usedAccessoryQty(order: BookingOrder, accessoryName: string): number {
     const item = order.accessoriesDetail.find((accessory) => accessory.name === accessoryName);
     return item?.qty || 0;
   }
-
   if (Array.isArray(order.accessories) && order.accessories.includes(accessoryName)) {
     return 1;
   }
-
   return 0;
 }
 
@@ -136,12 +187,14 @@ export function getAvailableAccessoryQty(
   return Math.max(0, totalQty - used);
 }
 
-function validateAvailability(
+// ─── Check availability ───────────────────────────────────────────────────────
+
+function validateAvailabilityLegacy(
   request: BookingRequest,
   catalog: { cameras: Camera[]; accessories: Accessory[] },
   orders: BookingOrder[],
 ): void {
-  const rental = requireRental(request);
+  const rental = requireRentalLegacy(request);
   const dateRange = getDateRange(rental.date, rental.days);
 
   for (const item of request.items?.cameras || []) {
@@ -188,6 +241,41 @@ function validateAvailability(
   }
 }
 
+// Check trùng ca cho ca-based booking
+function validateAvailabilityCa(
+  request: BookingRequest,
+  catalog: { cameras: Camera[] },
+  orders: BookingOrder[],
+): { allSlots: CaSlot[] } {
+  const rental = requireRentalCa(request);
+  const allSlots: CaSlot[] = [];
+
+  for (const item of request.items?.cameras || []) {
+    const camera = catalog.cameras.find((cam) => item.id !== undefined && pricingInternals.sameId(cam.id, item.id));
+    if (!camera) throw new HttpError(400, `Camera ${item.id ?? ""} was not found`);
+
+    // Tính ca của máy này
+    const maMay = String(camera.id);
+    const slots = tinhCaKhoa(maMay, rental.ngayNhan, rental.gioNhan, rental.soNgay, rental.gioTra);
+
+    // Check trùng với đơn đang active
+    const trung = checkTrungCa(slots, orders);
+    if (trung.length > 0) {
+      const detail = trung.map((s) => `Ca ${s.ca} ngày ${s.ngay}`).join(", ");
+      throw new HttpError(409, `Máy "${camera.name}" đã có lịch: ${detail}`, {
+        item: camera.name,
+        slotsTrung: trung,
+      });
+    }
+
+    allSlots.push(...slots);
+  }
+
+  return { allSlots };
+}
+
+// ─── Pricing ──────────────────────────────────────────────────────────────────
+
 function buildPricingFromData(
   request: BookingRequest,
   catalog: { cameras: Camera[]; accessories: Accessory[]; deliveryFees: Array<{ name: string; fee: number }> },
@@ -204,7 +292,10 @@ function buildPricingFromData(
     rentalDiscountAmt: discountResult.rentalDiscountAmt,
     deliveryDiscountAmt: discountResult.deliveryDiscountAmt,
     discountAmt,
-    total: Math.max(0, subtotalBreakdown.subtotal - discountResult.rentalDiscountAmt + deliveryFee - discountResult.deliveryDiscountAmt),
+    total: Math.max(
+      0,
+      subtotalBreakdown.subtotal - discountResult.rentalDiscountAmt + deliveryFee - discountResult.deliveryDiscountAmt,
+    ),
     appliedDiscounts: discountResult.appliedDiscounts,
   };
 }
@@ -219,7 +310,6 @@ async function rollbackDiscountUsage(repo: Repository, discountIds: Id[]): Promi
           ? { ...discount, usedCount: Math.max(0, (discount.usedCount || 0) - 1) }
           : discount,
       );
-
       const result = await casJsonValue(repo, STORE_KEYS.discounts, next, meta.updatedAt);
       if (result.ok) break;
     }
@@ -233,10 +323,7 @@ async function reserveDiscounts(
 ): Promise<{ pricing: PricingBreakdown; reservedIds: Id[] }> {
   const requestedCodes = request.discountCodes || [];
   if (requestedCodes.length === 0) {
-    return {
-      pricing: buildPricingFromData(request, catalog, []),
-      reservedIds: [],
-    };
+    return { pricing: buildPricingFromData(request, catalog, []), reservedIds: [] };
   }
 
   const reservedIds: Id[] = [];
@@ -266,13 +353,95 @@ async function reserveDiscounts(
   }
 }
 
-function buildOrder(
+// ─── Build order object ───────────────────────────────────────────────────────
+
+function buildOrderCa(
+  request: BookingRequest,
+  pricing: PricingBreakdown,
+  existingOrders: BookingOrder[],
+  caSlots: CaSlot[],
+): BookingOrder {
+  const customer = requireCustomer(request);
+  const rental = requireRentalCa(request);
+  const firstCamera = pricing.cameras[0];
+
+  const totalCa = countCa(rental.ngayNhan, rental.gioNhan, rental.soNgay, rental.gioTra);
+
+  // Override subtotal theo ca
+  const giaMayTheoNgay = firstCamera ? firstCamera.unitPrice : 169000;
+  const tongTienCa = tinhTienTheoCa(totalCa, giaMayTheoNgay);
+
+  const deliveryType = request.delivery?.type === "selfPickup" ? "selfPickup" : request.delivery?.ward ? "delivery" : "";
+  const address =
+    deliveryType === "selfPickup"
+      ? "Shop 92 KA ME RA (tự đến shop nhận)"
+      : [request.delivery?.street, request.delivery?.ward, request.delivery?.district].filter(Boolean).join(", ") ||
+        customer.address;
+
+  const appliedDiscounts = pricing.appliedDiscounts.map((discount) => ({
+    code: discount.code,
+    scope: discount.scope,
+    amt: discount.discountAmt,
+  }));
+
+  // Ngày kết thúc (để tương thích với date/days cũ)
+  const ngayCuoi = dateAddDays(rental.ngayNhan, rental.soNgay - 1);
+  const hTra = parseHour(rental.gioTra);
+  const isOvernight = hTra > 20;
+
+  return {
+    id: newOrderId(existingOrders),
+    submitKey: request.submitKey || `api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+
+    // Ca-based fields
+    ngayNhan: rental.ngayNhan,
+    gioNhan: rental.gioNhan,
+    gioTra: rental.gioTra,
+    soNgay: rental.soNgay,
+    totalCa,
+    caSlots,
+
+    // Legacy fields (giữ để UI cũ không bị break)
+    date: rental.ngayNhan,
+    days: rental.soNgay,
+    session: "full" as const,
+
+    cameraId: firstCamera?.id,
+    cameraName: pricing.cameras.map((c) => `${c.name}${c.qty > 1 ? ` x${c.qty}` : ""}`).join(", "),
+    cameras: pricing.cameras.map((c) => ({ id: c.id, name: c.name, qty: c.qty, price: c.unitPrice })),
+    accessories: pricing.accessories.map((a) => (a.qty > 1 ? `${a.name} x${a.qty}` : a.name)),
+    accessoriesDetail: pricing.accessories.map((a) => ({ name: a.name, qty: a.qty })),
+
+    subtotal: tongTienCa, // override: tính theo ca
+    discountCode: appliedDiscounts[0]?.code || null,
+    discountAmt: pricing.discountAmt,
+    rentalDiscountAmt: pricing.rentalDiscountAmt,
+    deliveryDiscountAmt: pricing.deliveryDiscountAmt,
+    appliedDiscounts,
+    total: Math.max(0, tongTienCa - pricing.discountAmt + pricing.deliveryFee - pricing.deliveryDiscountAmt),
+    deliveryFee: pricing.deliveryFee,
+
+    ...customer,
+    address,
+    deliveryWard: request.delivery?.ward || "",
+    deliveryDistrict: request.delivery?.district || "",
+    deliveryType,
+
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    seen: false,
+    userPhone: customer.phone,
+    userEmail: customer.email,
+  };
+}
+
+function buildOrderLegacy(
   request: BookingRequest,
   pricing: PricingBreakdown,
   existingOrders: BookingOrder[],
 ): BookingOrder {
   const customer = requireCustomer(request);
-  const rental = requireRental(request);
+  const rental = requireRentalLegacy(request);
   const firstCamera = pricing.cameras[0];
   const deliveryType = request.delivery?.type === "selfPickup" ? "selfPickup" : request.delivery?.ward ? "delivery" : "";
   const address =
@@ -291,20 +460,10 @@ function buildOrder(
     id: newOrderId(existingOrders),
     submitKey: request.submitKey || `api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     cameraId: firstCamera?.id,
-    cameraName: pricing.cameras.map((camera) => `${camera.name}${camera.qty > 1 ? ` x${camera.qty}` : ""}`).join(", "),
-    cameras: pricing.cameras.map((camera) => ({
-      id: camera.id,
-      name: camera.name,
-      qty: camera.qty,
-      price: camera.unitPrice,
-    })),
-    accessories: pricing.accessories.map((accessory) =>
-      accessory.qty > 1 ? `${accessory.name} x${accessory.qty}` : accessory.name,
-    ),
-    accessoriesDetail: pricing.accessories.map((accessory) => ({
-      name: accessory.name,
-      qty: accessory.qty,
-    })),
+    cameraName: pricing.cameras.map((c) => `${c.name}${c.qty > 1 ? ` x${c.qty}` : ""}`).join(", "),
+    cameras: pricing.cameras.map((c) => ({ id: c.id, name: c.name, qty: c.qty, price: c.unitPrice })),
+    accessories: pricing.accessories.map((a) => (a.qty > 1 ? `${a.name} x${a.qty}` : a.name)),
+    accessoriesDetail: pricing.accessories.map((a) => ({ name: a.name, qty: a.qty })),
     days: rental.days,
     subtotal: pricing.subtotal,
     discountCode: appliedDiscounts[0]?.code || null,
@@ -312,7 +471,7 @@ function buildOrder(
     rentalDiscountAmt: pricing.rentalDiscountAmt,
     deliveryDiscountAmt: pricing.deliveryDiscountAmt,
     appliedDiscounts,
-    total: pricing.total,
+    total: Math.max(0, pricing.subtotal - pricing.rentalDiscountAmt + pricing.deliveryFee - pricing.deliveryDiscountAmt),
     session: rental.session,
     shift: rental.days === 0.5 && rental.session !== "full" ? rental.session : null,
     createdAt: new Date().toISOString(),
@@ -330,9 +489,17 @@ function buildOrder(
   };
 }
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 export async function createBooking(repo: Repository, request: BookingRequest): Promise<BookingOrder> {
   requireCustomer(request);
-  requireRental(request);
+
+  const useCa = isCaBasedRequest(request);
+  if (useCa) {
+    requireRentalCa(request);
+  } else {
+    requireRentalLegacy(request);
+  }
 
   const catalog = await getCatalogData(repo);
 
@@ -342,19 +509,34 @@ export async function createBooking(repo: Repository, request: BookingRequest): 
     try {
       const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
       const liveOrders = arrayOrEmpty<BookingOrder>(meta.value);
+
+      // Idempotency check
       const existingBySubmitKey = request.submitKey
         ? liveOrders.find((order) => order.submitKey === request.submitKey)
         : undefined;
-
       if (existingBySubmitKey) {
         await rollbackDiscountUsage(repo, reservedIds);
         return existingBySubmitKey;
       }
 
-      validateAvailability(request, catalog, liveOrders);
+      let order: BookingOrder;
 
-      const order = buildOrder(request, pricing, liveOrders);
-      const result = await casJsonValue(repo, STORE_KEYS.orders, [{ ...order, seen: false }, ...liveOrders], meta.updatedAt);
+      if (useCa) {
+        // Ca-based: check trùng ca trước
+        const { allSlots } = validateAvailabilityCa(request, catalog, liveOrders);
+        order = buildOrderCa(request, pricing, liveOrders, allSlots);
+      } else {
+        // Legacy: check theo session cũ
+        validateAvailabilityLegacy(request, catalog, liveOrders);
+        order = buildOrderLegacy(request, pricing, liveOrders);
+      }
+
+      const result = await casJsonValue(
+        repo,
+        STORE_KEYS.orders,
+        [{ ...order, seen: false }, ...liveOrders],
+        meta.updatedAt,
+      );
 
       if (result.ok) return order;
     } catch (error) {
@@ -401,15 +583,10 @@ export async function updateBookingStatus(
     const order = orders.find((item) => item.id === orderId);
     if (!order) throw new HttpError(404, "Booking was not found");
 
-    const nextOrder = {
-      ...order,
-      status,
-      seen: true,
-      updatedAt: new Date().toISOString(),
-    };
-
+    const nextOrder = { ...order, status, seen: true, updatedAt: new Date().toISOString() };
     const nextOrders = orders.map((item) => (item.id === orderId ? nextOrder : item));
     const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
+
     if (result.ok) {
       if (status === "cancelled" && order.status !== "cancelled" && Array.isArray(order.appliedDiscounts)) {
         const discounts = arrayOrEmpty<Discount>(await getJsonValue<Discount[]>(repo, STORE_KEYS.discounts));
@@ -461,6 +638,36 @@ export async function getAvailability(
       ),
     })),
   };
+}
+
+// Route check ca trống (gọi từ frontend trước khi submit)
+export async function checkCaAvailability(
+  repo: Repository,
+  params: {
+    maMay: string;
+    ngayNhan: string;
+    gioNhan: string;
+    soNgay: number;
+    gioTra: string;
+    giaTheoNgay?: number;
+  },
+) {
+  const { maMay, ngayNhan, gioNhan, soNgay, gioTra, giaTheoNgay = 169000 } = params;
+
+  validateGioNhanTra(gioNhan, gioTra, soNgay);
+
+  const slots = tinhCaKhoa(maMay, ngayNhan, gioNhan, soNgay, gioTra);
+  const orders = arrayOrEmpty<BookingOrder>(await getJsonValue<BookingOrder[]>(repo, STORE_KEYS.orders));
+  const trung = checkTrungCa(slots, orders);
+
+  if (trung.length > 0) {
+    return { trung: true, slotsTrung: trung };
+  }
+
+  const totalCa = slots.length;
+  const tongTien = tinhTienTheoCa(totalCa, giaTheoNgay);
+
+  return { trung: false, totalCa, tongTien, slots };
 }
 
 export { dateAddDays };
