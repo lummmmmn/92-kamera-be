@@ -42,14 +42,40 @@ export type DeliveryFee = {
   fee: number;
 };
 
+// Ca thuê máy
+// Ca 1 — Sáng:  07:00–12:00
+// Ca 2 — Chiều: 12:00–17:00
+// Ca 3 — Tối:   17:00–20:00
+export type CaId = 1 | 2 | 3;
+
+export type CaSlot = {
+  ngay: string; // "YYYY-MM-DD"
+  ca: CaId;
+  maMay: string;
+};
+
 export type BookingOrder = {
   id: string;
   submitKey?: string;
   status: "pending" | "confirmed" | "active" | "completed" | "cancelled" | string;
+
+  // --- Legacy fields (giữ nguyên để không break UI cũ) ---
   date: string;
   days: number;
   session: "morning" | "afternoon" | "full";
   shift?: "morning" | "afternoon" | null;
+
+  // --- Ca-based fields (MỚI) ---
+  // Nếu booking dùng hệ ca mới, các field này sẽ có giá trị
+  ngayNhan?: string;   // "YYYY-MM-DD"
+  gioNhan?: string;    // "HH:MM"
+  gioTra?: string;     // "HH:MM"
+  caStart?: CaId;      // ca nhận
+  caEnd?: CaId;        // ca trả
+  soNgay?: number;     // số ngày thuê (nguyên)
+  totalCa?: number;    // tổng số ca tính tiền
+  caSlots?: CaSlot[];  // danh sách ca bị khoá (để check trùng)
+
   cameraId?: Id;
   cameraName?: string;
   cameras?: Array<{ id: Id; name: string; qty: number; price: number }>;
@@ -93,9 +119,15 @@ export type BookingRequest = {
     note?: string;
   };
   rental?: {
+    // Legacy
     date?: string;
     days?: number;
     session?: "morning" | "afternoon" | "full";
+    // Ca-based mới
+    ngayNhan?: string;  // "YYYY-MM-DD"
+    gioNhan?: string;   // "HH:MM"
+    gioTra?: string;    // "HH:MM"
+    soNgay?: number;    // số ngày thuê
   };
   items?: {
     cameras?: BookingItemInput[];
