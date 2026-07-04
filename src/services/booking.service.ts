@@ -580,11 +580,11 @@ export async function updateBookingStatus(
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
     const orders = arrayOrEmpty<BookingOrder>(meta.value);
-    const order = orders.find((item) => item.id === orderId);
+    const order = orders.find((item) => String(item.id) === String(orderId));
     if (!order) throw new HttpError(404, "Booking was not found");
 
     const nextOrder = { ...order, status, seen: true, updatedAt: new Date().toISOString() };
-    const nextOrders = orders.map((item) => (item.id === orderId ? nextOrder : item));
+    const nextOrders = orders.map((item) => (String(item.id) === String(orderId) ? nextOrder : item));
     const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
 
     if (result.ok) {
