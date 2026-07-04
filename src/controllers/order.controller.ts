@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { STORE_KEYS } from "../config/storeKeys.js";
-import { requireAdmin } from "../middleware/auth.js";
+import { requireAdmin, isAdminRequest } from "../middleware/auth.js";
 import { getRepository } from "../repositories/index.js";
 import {
   createBooking,
@@ -281,10 +281,11 @@ export const orderController = {
 
     const userRole = req.user?.role;
     const userSub = req.user?.sub;
+    const isAdmin = isAdminRequest(req) || userSub === "admin" || userRole === "admin";
 
     let adminOrOwnerCheck = (_order: BookingOrder) => false;
 
-    if (userSub === "admin" || userRole === "admin") {
+    if (isAdmin) {
       adminOrOwnerCheck = () => true;
     } else if (userSub) {
       try {
