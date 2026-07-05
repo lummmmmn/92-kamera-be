@@ -10,12 +10,15 @@ export const STORE_KEYS = {
   deliveryFees: "k92_delivery_fees_v1",
 } as const;
 
-export const PUBLIC_WRITE_KEYS = new Set<string>([
-  STORE_KEYS.orders,
-  STORE_KEYS.discounts,
-  STORE_KEYS.feedbacks,
-  STORE_KEYS.users,
-]);
+// Endpoint /storage là generic KV read/write, KHÔNG đi qua schema validation hay
+// business logic (availability check, discount rule, giá tiền...) như các route
+// /api/orders, /api/discounts, /api/users. Vì vậy KHÔNG được để bất kỳ key nào
+// public-write ở đây — nếu không client bất kỳ (không cần token admin) có thể
+// POST /storage để ghi đè thẳng toàn bộ đơn hàng / mã giảm giá / user, bỏ qua
+// hết validate. FE hiện tại (api/index.js) cũng không gọi /storage cho các key
+// này — mọi thao tác đều đi qua route riêng đã có requireAdmin/requireCustomer
+// phù hợp, nên để set này rỗng là an toàn và không phá vỡ tính năng nào.
+export const PUBLIC_WRITE_KEYS = new Set<string>([]);
 
 export const ADMIN_PASSWORD_KEY = "k92_admin_pw_hash";
 
