@@ -1,5 +1,7 @@
 import type { Request, Response } from "express";
 import { env } from "../config/env.js";
+import { ADMIN_PASSWORD_KEY } from "../config/storeKeys.js";
+import { requireAdmin } from "../middleware/auth.js";
 import { getRepository } from "../repositories/index.js";
 import { createAdminToken, createCustomerToken, getAdminPasswordHash, sha256Hex } from "../services/auth.service.js";
 import type { KvRecord } from "../services/kvResource.service.js";
@@ -83,6 +85,36 @@ export const authController = {
   },
 
   async logout(_req: Request, res: Response) {
+    res.json({ ok: true });
+  },
+
+  // Đổi mật khẩu admin — lưu THẬT vào DB (kv_store, key k92_admin_pw_hash),
+  // khác với bản cũ ở FE chỉ lưu localStorage (không có tác dụng với server).
+  // Yêu cầu phải có token admin hợp lệ (đã login bằng mật khẩu hiện tại) mới
+  // cho đổi, và phải xác nhận đúng mật khẩu hiện tại trước khi ghi mật khẩu mới.
+  async changePassword(req: Request, res: Response) {
+    requireAdmin(req);
+
+    const body = (req.body || {}) as KvRecord;
+    const oldPassword = typeof body.oldPassword === "string" ? body.oldPassword : "";
+    const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+
+    if (!oldPassword || !newPassword) {
+      throw new HttpError(400, "oldPassword và newPassword là bắt buộc");
+    }
+    if (newPassword.length < 6) {
+      throw new HttpError(400, "Mật khẩu mới phải có ít nhất 6 ký tự");
+    }
+
+    const repo = await getRepository();
+    const expectedHash = await getAdminPasswordHash(repo);
+    if (sha256Hex(oldPassword) !== expectedHash) {
+      throw new HttpError(401, "Mật khẩu hiện tại không đúng");
+    }
+
+    const newHash = sha256Hex(newPassword);
+    await repo.setKv(ADMIN_PASSWORD_KEY, newHash);
+
     res.json({ ok: true });
   },
 };
