@@ -78,6 +78,8 @@ deliveryFeeRouter.get("/", asyncHandler(deliveryFeeController.list));
 deliveryFeeRouter.put("/", asyncHandler(deliveryFeeController.replace));
 
 export const userRouter = Router();
-userRouter.get("/", asyncHandler(userController.list));
-userRouter.get("/google/:googleId", asyncHandler(userController.getByGoogleId));
-userRouter.post("/upsert", asyncHandler(userController.upsert));
+// authenticate: parse token nếu có (không bắt buộc) để req.user được set cho
+// customer đã login Google — userController tự phân biệt admin/customer/khách vãng lai.
+userRouter.get("/", authenticate, asyncHandler(userController.list));
+userRouter.get("/google/:googleId", authenticate, asyncHandler(userController.getByGoogleId));
+userRouter.post("/upsert", authenticate, asyncHandler(userController.upsert));
