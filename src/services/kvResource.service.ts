@@ -2,6 +2,28 @@ import type { Repository } from "../types/repository.js";
 import { parseStoredJson } from "../utils/http.js";
 import { HttpError } from "../utils/httpError.js";
 
+const MAX_CAS_ATTEMPTS = 5;
+
+// Đọc-sửa-ghi có compare-and-swap: tránh mất dữ liệu khi 2 admin cùng sửa
+// cameras/accessories/discounts/... đồng thời (trước đây createResource/
+// updateResource/deleteResource chỉ getResourceArray() rồi setResourceArray()
+// thẳng, không check version, request nào ghi xong sau sẽ đè mất thay đổi của
+// request ghi trước).
+async function casUpdateArray(
+  repo: Repository,
+  key: string,
+  mutate: (items: KvRecord[]) => KvRecord[],
+): Promise<KvRecord[]> {
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const row = await repo.getKv(key);
+    const items = asArray(parseStoredJson(row.value));
+    const next = mutate(items);
+    const result = await repo.casKv(key, JSON.stringify(next), row.updatedAt);
+    if (result.ok) return next;
+  }
+  throw new HttpError(409, "Data changed while saving. Please try again.");
+}
+
 export type KvRecord = Record<string, unknown>;
 
 export type ResourceConfig = {
@@ -60,9 +82,7 @@ export async function createResource(repo: Repository, config: ResourceConfig, v
   const item = { ...body };
   item[idField] ??= nextId(config.generateIdPrefix);
 
-  const items = await getResourceArray(repo, config.key);
-  items.unshift(item);
-  await setResourceArray(repo, config.key, items);
+  await casUpdateArray(repo, config.key, (items) => [item, ...items]);
   return item;
 }
 
@@ -73,18 +93,21 @@ export async function upsertResource(repo: Repository, config: ResourceConfig, v
     body[idField] = nextId(config.generateIdPrefix);
   }
 
-  const items = await getResourceArray(repo, config.key);
-  const index = items.findIndex((item) => sameId(item[idField], body[idField]));
-  const current = index >= 0 ? items[index] : undefined;
-  const next = current ? { ...current, ...body } : body;
+  let next: KvRecord = body;
+  await casUpdateArray(repo, config.key, (items) => {
+    const index = items.findIndex((item) => sameId(item[idField], body[idField]));
+    const current = index >= 0 ? items[index] : undefined;
+    next = current ? { ...current, ...body } : body;
 
-  if (index >= 0) {
-    items[index] = next;
-  } else {
-    items.unshift(next);
-  }
+    const copy = [...items];
+    if (index >= 0) {
+      copy[index] = next;
+    } else {
+      copy.unshift(next);
+    }
+    return copy;
+  });
 
-  await setResourceArray(repo, config.key, items);
   return next;
 }
 
@@ -104,26 +127,38 @@ export async function updateResource(
 ): Promise<KvRecord> {
   const body = asObject(value);
   const idField = getIdField(config);
-  const items = await getResourceArray(repo, config.key);
-  const index = items.findIndex((item) => sameId(item[idField], id));
-  if (index < 0) throw new HttpError(404, `${idField} was not found`);
 
-  const current = items[index];
-  if (!current) throw new HttpError(404, `${idField} was not found`);
+  let next: KvRecord | null = null;
+  await casUpdateArray(repo, config.key, (items) => {
+    const index = items.findIndex((item) => sameId(item[idField], id));
+    if (index < 0) throw new HttpError(404, `${idField} was not found`);
 
-  const next = { ...current, ...body, [idField]: current[idField] };
-  items[index] = next;
-  await setResourceArray(repo, config.key, items);
+    const current = items[index];
+    if (!current) throw new HttpError(404, `${idField} was not found`);
+
+    next = { ...current, ...body, [idField]: current[idField] };
+    const copy = [...items];
+    copy[index] = next;
+    return copy;
+  });
+
+  if (!next) throw new HttpError(404, `${idField} was not found`);
   return next;
 }
 
 export async function deleteResource(repo: Repository, config: ResourceConfig, id: string): Promise<KvRecord> {
   const idField = getIdField(config);
-  const items = await getResourceArray(repo, config.key);
-  const index = items.findIndex((item) => sameId(item[idField], id));
-  if (index < 0) throw new HttpError(404, `${idField} was not found`);
 
-  const [removed] = items.splice(index, 1);
-  await setResourceArray(repo, config.key, items);
-  return removed || {};
+  let removed: KvRecord = {};
+  await casUpdateArray(repo, config.key, (items) => {
+    const index = items.findIndex((item) => sameId(item[idField], id));
+    if (index < 0) throw new HttpError(404, `${idField} was not found`);
+
+    const copy = [...items];
+    const [deletedItem] = copy.splice(index, 1);
+    removed = deletedItem || {};
+    return copy;
+  });
+
+  return removed;
 }
