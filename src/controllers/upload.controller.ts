@@ -135,4 +135,33 @@ export const uploadController = {
       bytes: result.bytes,
     });
   },
+
+  /**
+   * POST /api/upload/avatar
+   * Upload avatar khách hàng — chỉ cần đăng nhập (không cần admin).
+   * Folder + public_id do server tự set (public_id = googleId của chính
+   * người upload) — client KHÔNG được tự chọn, tránh ghi đè ảnh người khác
+   * hoặc spam folder Cloudinary bằng public_id tuỳ ý.
+   */
+  async uploadAvatar(req: Request, res: Response) {
+    if (!req.user?.sub) throw new HttpError(401, "Yêu cầu đăng nhập");
+
+    if (!req.is("multipart/form-data")) {
+      throw new HttpError(400, "Yêu cầu multipart/form-data");
+    }
+
+    const { fileBuffer, mimeType } = await parseMultipart(req);
+
+    const result = await uploadToCloudinary(fileBuffer, mimeType, {
+      folder: "92kamera_avatars",
+      publicId: `avatar_${req.user.sub}`,
+    });
+
+    res.status(201).json({
+      ok: true,
+      url: result.secure_url,
+      secure_url: result.secure_url,
+      public_id: result.public_id,
+    });
+  },
 };
