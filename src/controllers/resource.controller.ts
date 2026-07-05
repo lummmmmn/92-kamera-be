@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { STORE_KEYS } from "../config/storeKeys.js";
-import { requireAdmin } from "../middleware/auth.js";
+import { isAdminRequest, requireAdmin } from "../middleware/auth.js";
 import {
   accessorySchema,
   albumSchema,
@@ -224,22 +224,72 @@ export const discountController = {
 };
 
 export const userController = {
-  async list(_req: Request, res: Response) {
+  // GET /api/users
+  // Admin: trả về toàn bộ map user.
+  // Customer (đăng nhập Google): chỉ trả về đúng 1 record của chính mình.
+  // Không đăng nhập: từ chối — trước đây endpoint này public 100%, lộ toàn bộ
+  // SĐT/địa chỉ/avatar của mọi khách hàng.
+  async list(req: Request, res: Response) {
     const repo = await getRepository();
-    const users = await getUsersMap(repo);
-    res.json(users);
+
+    if (isAdminRequest(req)) {
+      const users = await getUsersMap(repo);
+      res.json(users);
+      return;
+    }
+
+    if (!req.user?.sub) throw new HttpError(401, "Yêu cầu đăng nhập");
+
+    const own = await findUserByGoogleId(repo, req.user.sub).catch(() => null);
+    if (!own) {
+      res.json({});
+      return;
+    }
+    const key = own.email || own.phone || own.googleId || req.user.sub;
+    res.json({ [String(key)]: own });
   },
 
   async getByGoogleId(req: Request, res: Response) {
+    const googleId = req.params.googleId || "";
+    if (!isAdminRequest(req) && req.user?.sub !== googleId) {
+      throw new HttpError(403, "Không có quyền xem thông tin user khác");
+    }
     const repo = await getRepository();
-    const user = await findUserByGoogleId(repo, req.params.googleId || "");
+    const user = await findUserByGoogleId(repo, googleId);
     res.json(user);
   },
 
+  // POST /api/users/upsert
+  // Admin: được sửa bất kỳ user nào (dùng cho UsersPanel admin).
+  // Customer: chỉ được sửa đúng record của chính mình — server tự xác định
+  // key theo googleId trong token, KHÔNG tin key mà client gửi lên.
   async upsert(req: Request, res: Response) {
     const body = bodyRecord(req);
     const repo = await getRepository();
-    const result = await upsertUsers(repo, body);
-    res.json(result.user || result.users);
+
+    if (isAdminRequest(req)) {
+      const result = await upsertUsers(repo, body);
+      res.json(result.user || result.users);
+      return;
+    }
+
+    if (!req.user?.sub) throw new HttpError(401, "Yêu cầu đăng nhập");
+
+    const owner = await findUserByGoogleId(repo, req.user.sub).catch(() => null);
+    if (!owner) throw new HttpError(404, "Không tìm thấy tài khoản");
+
+    const ownKey = String(owner.email || owner.phone || owner.googleId || req.user.sub);
+
+    // Body có thể là { [key]: {...} } (map) hoặc {...} (record thẳng) —
+    // cả 2 trường hợp đều chỉ lấy đúng phần dữ liệu của chính chủ.
+    const incoming = (body[ownKey] && typeof body[ownKey] === "object" ? body[ownKey] : body) as Record<string, unknown>;
+
+    // Chặn client tự đổi googleId/role để leo quyền.
+    const { googleId: _ignoreGoogleId, role: _ignoreRole, ...safeFields } = incoming;
+
+    const result = await upsertUsers(repo, {
+      [ownKey]: { ...safeFields, googleId: owner.googleId },
+    });
+    res.json(result.users[ownKey]);
   },
 };
