@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { requireAdmin } from "../middleware/auth.js";
 import { photoSchema, validateModelInput } from "../models/index.js";
 import { getRepository } from "../repositories/index.js";
+import { uploadToCloudinary } from "../services/cloudinary.service.js";
 import { getResourceById, updateResource, type KvRecord } from "../services/kvResource.service.js";
 import { parseLimit, parseOffset, requireString } from "../utils/http.js";
 import { HttpError } from "../utils/httpError.js";
@@ -64,6 +65,12 @@ function readRequestBuffer(req: Request): Promise<Buffer> {
   });
 }
 
+/**
+ * Parse multipart/form-data thủ công VÀ upload file thật lên Cloudinary.
+ * (Trước đây hàm này nhúng ảnh dạng base64 data-URI thẳng vào field `url` —
+ *  gây phình MongoDB. Giờ upload lên Cloudinary giống hệt luồng /api/upload,
+ *  chỉ lưu lại secure_url.)
+ */
 async function multipartPayload(req: Request, defaultFolder: string): Promise<KvRecord> {
   const contentType = req.headers["content-type"] || "";
   const boundary = String(contentType).match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] ||
@@ -106,12 +113,19 @@ async function multipartPayload(req: Request, defaultFolder: string): Promise<Kv
   if (!file) throw new HttpError(400, "multipart file is required");
 
   const folder = fields.folder || defaultFolder;
-  const id = fields.public_id || fields.publicId || fields.id || newPublicId(folder);
+  const publicId = fields.public_id || fields.publicId || fields.id;
+
+  // Upload thật lên Cloudinary — không nhúng base64 vào DB nữa
+  const uploaded = await uploadToCloudinary(file.data, file.contentType, {
+    folder,
+    publicId,
+  });
+
   return {
-    public_id: id,
-    publicId: id,
-    id,
-    url: `data:${file.contentType};base64,${file.data.toString("base64")}`,
+    public_id: uploaded.public_id,
+    publicId: uploaded.public_id,
+    id: uploaded.public_id,
+    url: uploaded.secure_url,
     uploadedAt: new Date().toISOString(),
   };
 }
