@@ -52,20 +52,15 @@ export const authController = {
   async google(req: Request, res: Response) {
     const body = ((req.body || {}) as KvRecord) ?? {};
     const credential = typeof body.credential === "string" ? body.credential : "";
-    const tokenPayload = credential ? await verifyGoogleCredential(credential) : {};
-    const profile =
-      body.profile && typeof body.profile === "object" && !Array.isArray(body.profile)
-        ? (body.profile as KvRecord)
-        : body.user && typeof body.user === "object" && !Array.isArray(body.user)
-          ? (body.user as KvRecord)
-          : {};
+    if (!credential) throw new HttpError(400, "credential is required");
+    const tokenPayload = await verifyGoogleCredential(credential);
 
-    const googleId = pickString(body.googleId, body.sub, body.id, profile.googleId, profile.sub, profile.id, tokenPayload.sub);
+    const googleId = pickString(tokenPayload.sub);
     if (!googleId) throw new HttpError(400, "googleId is required");
 
-    const email = pickString(body.email, profile.email, tokenPayload.email);
-    const name = pickString(body.name, profile.name, tokenPayload.name);
-    const avatar = pickString(body.avatar, body.picture, profile.avatar, profile.picture, tokenPayload.picture);
+    const email = pickString(tokenPayload.email);
+    const name = pickString(tokenPayload.name, pickString(body.name));
+    const avatar = pickString(tokenPayload.picture, pickString(body.avatar, body.picture));
     const now = new Date().toISOString();
 
     const repo = await getRepository();
@@ -76,7 +71,7 @@ export const authController = {
       avatar,
       provider: "google",
       updatedAt: now,
-      createdAt: pickString(body.createdAt, profile.createdAt) || now,
+      createdAt: pickString(body.createdAt) || now,
     };
     const result = await upsertUsers(repo, payload);
 
