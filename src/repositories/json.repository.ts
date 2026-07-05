@@ -91,6 +91,22 @@ export function createJsonRepository(): Repository {
   const file = env.jsonDbFile;
   let writeQueue = Promise.resolve();
 
+  // Chạy 1 tác vụ đọc-rồi-ghi qua ĐÚNG 1 hàng đợi tuần tự với các lần ghi khác.
+  // Trước đây casKv() gọi load() đọc file trực tiếp, không qua writeQueue — nên
+  // 2 request casKv() đến gần như đồng thời vẫn có thể cùng đọc được cùng 1
+  // updated_at (vì request trước chưa kịp ghi xong), cả 2 đều pass check CAS,
+  // rồi ghi đè lên nhau qua writeQueue → mất y hệt loại lost-update mà CAS vốn
+  // sinh ra để chặn. Bọc toàn bộ chuỗi đọc+ghi vào 1 job trong writeQueue để
+  // đảm bảo tuần tự thật sự.
+  function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const result = writeQueue.then(job);
+    writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   async function load(): Promise<JsonDb> {
     if (!(await fileExists(file))) {
       await fs.mkdir(path.dirname(file), { recursive: true });
@@ -112,13 +128,10 @@ export function createJsonRepository(): Repository {
   }
 
   async function save(data: JsonDb): Promise<void> {
-    writeQueue = writeQueue.then(async () => {
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      const tmpFile = `${file}.tmp`;
-      await fs.writeFile(tmpFile, JSON.stringify(data, null, 2));
-      await fs.rename(tmpFile, file);
-    });
-    return writeQueue;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmpFile = `${file}.tmp`;
+    await fs.writeFile(tmpFile, JSON.stringify(data, null, 2));
+    await fs.rename(tmpFile, file);
   }
 
   return {
@@ -137,26 +150,30 @@ export function createJsonRepository(): Repository {
     },
 
     async setKv(keyName, value, updatedAt = new Date().toISOString()) {
-      const data = await load();
-      data.kv ||= {};
-      data.kv[keyName] = { value, updated_at: updatedAt };
-      await save(data);
-      return { ok: true, updatedAt };
+      return enqueue(async () => {
+        const data = await load();
+        data.kv ||= {};
+        data.kv[keyName] = { value, updated_at: updatedAt };
+        await save(data);
+        return { ok: true, updatedAt };
+      });
     },
 
     async casKv(keyName, value, expectedUpdatedAt) {
-      const data = await load();
-      data.kv ||= {};
-      const current = data.kv[keyName];
+      return enqueue(async () => {
+        const data = await load();
+        data.kv ||= {};
+        const current = data.kv[keyName];
 
-      if (expectedUpdatedAt && (!current || current.updated_at !== expectedUpdatedAt)) {
-        return { ok: false, updatedAt: current?.updated_at || null };
-      }
+        if (expectedUpdatedAt && (!current || current.updated_at !== expectedUpdatedAt)) {
+          return { ok: false, updatedAt: current?.updated_at || null };
+        }
 
-      const nextUpdatedAt = new Date().toISOString();
-      data.kv[keyName] = { value, updated_at: nextUpdatedAt };
-      await save(data);
-      return { ok: true, updatedAt: nextUpdatedAt };
+        const nextUpdatedAt = new Date().toISOString();
+        data.kv[keyName] = { value, updated_at: nextUpdatedAt };
+        await save(data);
+        return { ok: true, updatedAt: nextUpdatedAt };
+      });
     },
 
     async listPhotos(limitCount = 200, offsetCount = 0) {
