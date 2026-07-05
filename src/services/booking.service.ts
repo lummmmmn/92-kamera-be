@@ -367,9 +367,13 @@ function buildOrderCa(
 
   const totalCa = countCa(rental.ngayNhan, rental.gioNhan, rental.soNgay, rental.gioTra);
 
-  // Override subtotal theo ca
-  const giaMayTheoNgay = firstCamera ? firstCamera.unitPrice : 169000;
-  const tongTienCa = tinhTienTheoCa(totalCa, giaMayTheoNgay);
+  // Override subtotal theo ca — tính đủ cho TỪNG camera (theo qty) và TỪNG phụ
+  // kiện, rồi cộng dồn. Trước đây chỗ này chỉ lấy giá của firstCamera.unitPrice
+  // để tính cho toàn bộ đơn (bỏ qua số lượng, các camera khác, và mọi phụ kiện)
+  // → đơn thuê nhiều máy/phụ kiện qua flow ca-based bị tính tiền thiếu rất nhiều.
+  const tongTienCa =
+    pricing.cameras.reduce((sum, c) => sum + tinhTienTheoCa(totalCa, c.unitPrice) * c.qty, 0) +
+    pricing.accessories.reduce((sum, a) => sum + tinhTienTheoCa(totalCa, a.unitPrice) * a.qty, 0);
 
   const deliveryType = request.delivery?.type === "selfPickup" ? "selfPickup" : request.delivery?.ward ? "delivery" : "";
   const address =
