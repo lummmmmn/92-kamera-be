@@ -12,7 +12,8 @@ import {
   listBookings,
   updateBookingStatus,
 } from "../services/booking.service.js";
-import { getResourceArray, setResourceArray, type KvRecord } from "../services/kvResource.service.js";
+import { getResourceArray, type KvRecord } from "../services/kvResource.service.js";
+import { arrayOrEmpty, casJsonValue, getJsonValueWithMeta } from "../services/storage.service.js";
 import type { BookingOrder, BookingRequest } from "../types/domain.js";
 import { getDateRange } from "../utils/date.js";
 import { requireString } from "../utils/http.js";
@@ -272,19 +273,30 @@ export const orderController = {
       return;
     }
 
-    const orders = (await getResourceArray(repo, STORE_KEYS.orders)) as unknown as BookingOrder[];
-    const existing = body.submitKey
-      ? orders.find((order) => order.submitKey && order.submitKey === body.submitKey)
-      : undefined;
-    if (existing) {
-      res.json(existing);
-      return;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
+      const orders = arrayOrEmpty<BookingOrder>(meta.value);
+
+      const existing = body.submitKey
+        ? orders.find((order) => order.submitKey && order.submitKey === body.submitKey)
+        : undefined;
+      if (existing) {
+        res.json(existing);
+        return;
+      }
+
+      const order = normalizeLegacyOrder(body, orders);
+      await validateLegacyAvailability(repo, order, orders);
+
+      const result = await casJsonValue(repo, STORE_KEYS.orders, [order, ...orders], meta.updatedAt);
+      if (result.ok) {
+        res.status(201).json(order);
+        return;
+      }
+      // Có đơn khác vừa ghi song song trong lúc mình đang lưu → đọc lại data mới nhất, validate lại từ đầu rồi thử tiếp
     }
 
-    const order = normalizeLegacyOrder(body, orders);
-    await validateLegacyAvailability(repo, order, orders);
-    await setResourceArray(repo, STORE_KEYS.orders, [order as unknown as KvRecord, ...(orders as unknown as KvRecord[])]);
-    res.status(201).json(order);
+    throw new HttpError(409, "Đơn hàng vừa có thay đổi trong lúc lưu, vui lòng thử lại.");
   },
 
   async list(req: Request, res: Response) {
@@ -351,33 +363,42 @@ export const orderController = {
     const id = requireString(req.params.id, "id");
     const body = isRecord(req.body) ? req.body : {};
     const repo = await getRepository();
-    const orders = (await getResourceArray(repo, STORE_KEYS.orders)) as unknown as BookingOrder[];
-    const current = orders.find((item) => item.id === id);
-    if (!current) throw new HttpError(404, "Order was not found");
 
-    if (!isPublicCancellation(current, body)) requireAdmin(req);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
+      const orders = arrayOrEmpty<BookingOrder>(meta.value);
+      const current = orders.find((item) => item.id === id);
+      if (!current) throw new HttpError(404, "Order was not found");
 
-    const nextOrder = normalizeLegacyOrder({ ...current, ...body, id }, orders, current);
+      if (!isPublicCancellation(current, body)) requireAdmin(req);
 
-    // Only validate availability if dates, session, cameras or accessories have changed,
-    // or if the order is being reactivated (status changed from inactive to active).
-    const isReactivated = !ACTIVE_ORDER_STATUSES.has(current.status) && ACTIVE_ORDER_STATUSES.has(nextOrder.status);
-    const dateChanged = current.date !== nextOrder.date;
-    const daysChanged = current.days !== nextOrder.days;
-    const sessionChanged = current.session !== nextOrder.session;
-    const camerasChanged = JSON.stringify(current.cameras || []) !== JSON.stringify(nextOrder.cameras || []) ||
-                           current.cameraId !== nextOrder.cameraId ||
-                           current.cameraName !== nextOrder.cameraName;
-    const accessoriesChanged = JSON.stringify(current.accessories || []) !== JSON.stringify(nextOrder.accessories || []) ||
-                               JSON.stringify(current.accessoriesDetail || []) !== JSON.stringify(nextOrder.accessoriesDetail || []);
+      const nextOrder = normalizeLegacyOrder({ ...current, ...body, id }, orders, current);
 
-    if (isReactivated || dateChanged || daysChanged || sessionChanged || camerasChanged || accessoriesChanged) {
-      await validateLegacyAvailability(repo, nextOrder, orders);
+      // Only validate availability if dates, session, cameras or accessories have changed,
+      // or if the order is being reactivated (status changed from inactive to active).
+      const isReactivated = !ACTIVE_ORDER_STATUSES.has(current.status) && ACTIVE_ORDER_STATUSES.has(nextOrder.status);
+      const dateChanged = current.date !== nextOrder.date;
+      const daysChanged = current.days !== nextOrder.days;
+      const sessionChanged = current.session !== nextOrder.session;
+      const camerasChanged = JSON.stringify(current.cameras || []) !== JSON.stringify(nextOrder.cameras || []) ||
+                             current.cameraId !== nextOrder.cameraId ||
+                             current.cameraName !== nextOrder.cameraName;
+      const accessoriesChanged = JSON.stringify(current.accessories || []) !== JSON.stringify(nextOrder.accessories || []) ||
+                                 JSON.stringify(current.accessoriesDetail || []) !== JSON.stringify(nextOrder.accessoriesDetail || []);
+
+      if (isReactivated || dateChanged || daysChanged || sessionChanged || camerasChanged || accessoriesChanged) {
+        await validateLegacyAvailability(repo, nextOrder, orders);
+      }
+
+      const nextOrders = orders.map((item) => (item.id === id ? nextOrder : item));
+      const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
+      if (result.ok) {
+        res.json(nextOrder);
+        return;
+      }
     }
 
-    const nextOrders = orders.map((item) => (item.id === id ? nextOrder : item));
-    await setResourceArray(repo, STORE_KEYS.orders, nextOrders as unknown as KvRecord[]);
-    res.json(nextOrder);
+    throw new HttpError(409, "Đơn hàng vừa có thay đổi trong lúc lưu, vui lòng thử lại.");
   },
 
   async updateStatus(req: Request, res: Response) {
@@ -389,13 +410,18 @@ export const orderController = {
     let order = await updateBookingStatus(repo, orderId, status);
 
     if (typeof req.body?.adminNote === "string") {
-      const orders = (await getResourceArray(repo, STORE_KEYS.orders)) as unknown as BookingOrder[];
-      order = { ...order, adminNote: req.body.adminNote, updatedAt: new Date().toISOString() };
-      await setResourceArray(
-        repo,
-        STORE_KEYS.orders,
-        orders.map((item) => (item.id === orderId ? order : item)) as unknown as KvRecord[],
-      );
+      const adminNote = req.body.adminNote;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
+        const orders = arrayOrEmpty<BookingOrder>(meta.value);
+        const nextOrder = { ...order, adminNote, updatedAt: new Date().toISOString() };
+        const nextOrders = orders.map((item) => (item.id === orderId ? nextOrder : item));
+        const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
+        if (result.ok) {
+          order = nextOrder;
+          break;
+        }
+      }
     }
 
     res.json(order);
@@ -406,17 +432,22 @@ export const orderController = {
 
     const id = requireString(req.params.id, "id");
     const repo = await getRepository();
-    const orders = await getResourceArray(repo, STORE_KEYS.orders);
-    const order = findOrder(orders, id);
-    const nextOrder: BookingOrder = {
-      ...(order as BookingOrder),
-      seen: true,
-      updatedAt: new Date().toISOString(),
-    };
-    const nextOrders = orders.map((item) => (String(item.id) === id ? (nextOrder as unknown as KvRecord) : item));
-    await setResourceArray(repo, STORE_KEYS.orders, nextOrders);
 
-    res.json(nextOrder);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
+      const orders = arrayOrEmpty<BookingOrder>(meta.value);
+      const order = orders.find((item) => String(item.id) === id);
+      if (!order) throw new HttpError(404, "Order was not found");
+      const nextOrder: BookingOrder = { ...order, seen: true, updatedAt: new Date().toISOString() };
+      const nextOrders = orders.map((item) => (String(item.id) === id ? nextOrder : item));
+      const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
+      if (result.ok) {
+        res.json(nextOrder);
+        return;
+      }
+    }
+
+    throw new HttpError(409, "Đơn hàng vừa có thay đổi trong lúc lưu, vui lòng thử lại.");
   },
 
   async remove(req: Request, res: Response) {
@@ -424,11 +455,20 @@ export const orderController = {
 
     const id = requireString(req.params.id, "id");
     const repo = await getRepository();
-    const orders = await getResourceArray(repo, STORE_KEYS.orders);
-    const order = findOrder(orders, id);
-    const nextOrders = orders.filter((item) => String(item.id) !== id);
-    await setResourceArray(repo, STORE_KEYS.orders, nextOrders);
 
-    res.json(order);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
+      const orders = arrayOrEmpty<BookingOrder>(meta.value);
+      const order = orders.find((item) => String(item.id) === id);
+      if (!order) throw new HttpError(404, "Order was not found");
+      const nextOrders = orders.filter((item) => String(item.id) !== id);
+      const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
+      if (result.ok) {
+        res.json(order);
+        return;
+      }
+    }
+
+    throw new HttpError(409, "Đơn hàng vừa có thay đổi trong lúc lưu, vui lòng thử lại.");
   },
 };
