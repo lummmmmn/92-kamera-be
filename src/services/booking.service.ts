@@ -187,6 +187,72 @@ export function getAvailableAccessoryQty(
   return Math.max(0, totalQty - used);
 }
 
+// ─── Ca-schedule-aware availability (dùng cho đơn FE gửi kèm caSchedule) ──────
+// FE tính lịch theo từng ca (ca1/ca2/ca3) độc lập, nhưng validateLegacyAvailability
+// cũ chỉ check theo date+session (session luôn = "full" do FE gửi cứng) → hễ máy
+// có 1 đơn active bất kỳ trong ngày là bị chặn cả ngày, dù khác ca. Các hàm dưới
+// đây tái tạo đúng logic ca-based mà FE đã dùng để hiển thị (utils/availability.js)
+// để BE và FE thống nhất, tránh việc FE báo còn hàng nhưng BE vẫn từ chối.
+
+type CaScheduleSlot = { date: string; ca: string };
+
+function legacyCaForSession(session: string): string[] {
+  if (session === "morning") return ["ca1"];
+  if (session === "afternoon") return ["ca2", "ca3"];
+  return ["ca1", "ca2", "ca3"];
+}
+
+export function getOrderCaSchedule(order: BookingOrder): CaScheduleSlot[] {
+  const raw = (order as { caSchedule?: unknown }).caSchedule;
+  if (Array.isArray(raw) && raw.length > 0) {
+    return raw as CaScheduleSlot[];
+  }
+  if (!order.date || !order.days) return [];
+  const caList = legacyCaForSession(getOrderSession(order));
+  const nDays = order.days < 1 ? 1 : Math.ceil(order.days);
+  const out: CaScheduleSlot[] = [];
+  for (let i = 0; i < nDays; i += 1) {
+    const ds = dateAddDays(order.date, i);
+    for (const ca of caList) out.push({ date: ds, ca });
+  }
+  return out;
+}
+
+function relevantOrdersByCa(orders: BookingOrder[], targetDate: string, targetCa: string): BookingOrder[] {
+  return orders.filter((order) => {
+    if (!ACTIVE_ORDER_STATUSES.has(order.status)) return false;
+    return getOrderCaSchedule(order).some((slot) => slot.date === targetDate && slot.ca === targetCa);
+  });
+}
+
+export function getAvailableCameraQtyByCa(
+  cameraId: Id,
+  totalQty: number,
+  orders: BookingOrder[],
+  targetDate: string,
+  targetCa: string,
+): number {
+  const used = relevantOrdersByCa(orders, targetDate, targetCa).reduce(
+    (sum, order) => sum + usedCameraQty(order, cameraId),
+    0,
+  );
+  return Math.max(0, totalQty - used);
+}
+
+export function getAvailableAccessoryQtyByCa(
+  accessoryName: string,
+  totalQty: number,
+  orders: BookingOrder[],
+  targetDate: string,
+  targetCa: string,
+): number {
+  const used = relevantOrdersByCa(orders, targetDate, targetCa).reduce(
+    (sum, order) => sum + usedAccessoryQty(order, accessoryName),
+    0,
+  );
+  return Math.max(0, totalQty - used);
+}
+
 // ─── Check availability ───────────────────────────────────────────────────────
 
 function validateAvailabilityLegacy(
