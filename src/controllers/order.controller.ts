@@ -5,7 +5,10 @@ import { getRepository } from "../repositories/index.js";
 import {
   createBooking,
   getAvailableAccessoryQty,
+  getAvailableAccessoryQtyByCa,
   getAvailableCameraQty,
+  getAvailableCameraQtyByCa,
+  getOrderCaSchedule,
   listBookings,
   updateBookingStatus,
 } from "../services/booking.service.js";
@@ -182,17 +185,25 @@ async function validateLegacyAvailability(repo: Awaited<ReturnType<typeof getRep
     getResourceArray(repo, STORE_KEYS.cameras),
     getResourceArray(repo, STORE_KEYS.accessories),
   ]);
-  const dateRange = getDateRange(order.date, order.days);
   const otherOrders = orders.filter((item) => item.id !== order.id);
+  const caSchedule = getOrderCaSchedule(order);
+  const useCaCheck = caSchedule.length > 0;
+  const dateRange = useCaCheck ? [] : getDateRange(order.date, order.days);
 
   for (const request of cameraRequests(order)) {
     const camera = cameras.find((item) => sameId(item.id, request.id));
     if (!camera) throw new HttpError(400, `Camera ${String(request.id)} was not found`);
-    const minAvailable = Math.min(
-      ...dateRange.map((date) =>
-        getAvailableCameraQty(camera.id as string | number, numberOr(camera.qty, 1), otherOrders, date, order.session),
-      ),
-    );
+    const minAvailable = useCaCheck
+      ? Math.min(
+          ...caSchedule.map((slot) =>
+            getAvailableCameraQtyByCa(camera.id as string | number, numberOr(camera.qty, 1), otherOrders, slot.date, slot.ca),
+          ),
+        )
+      : Math.min(
+          ...dateRange.map((date) =>
+            getAvailableCameraQty(camera.id as string | number, numberOr(camera.qty, 1), otherOrders, date, order.session),
+          ),
+        );
     if (minAvailable < request.qty) {
       throw new HttpError(409, `Camera "${String(camera.name || request.id)}" is not available`, {
         item: camera.name,
@@ -205,11 +216,17 @@ async function validateLegacyAvailability(repo: Awaited<ReturnType<typeof getRep
   for (const request of accessoryRequests(order)) {
     const accessory = accessories.find((item) => item.name === request.name);
     if (!accessory) throw new HttpError(400, `Accessory ${request.name} was not found`);
-    const minAvailable = Math.min(
-      ...dateRange.map((date) =>
-        getAvailableAccessoryQty(request.name, numberOr(accessory.qty, 0), otherOrders, date, order.session),
-      ),
-    );
+    const minAvailable = useCaCheck
+      ? Math.min(
+          ...caSchedule.map((slot) =>
+            getAvailableAccessoryQtyByCa(request.name, numberOr(accessory.qty, 0), otherOrders, slot.date, slot.ca),
+          ),
+        )
+      : Math.min(
+          ...dateRange.map((date) =>
+            getAvailableAccessoryQty(request.name, numberOr(accessory.qty, 0), otherOrders, date, order.session),
+          ),
+        );
     if (minAvailable < request.qty) {
       throw new HttpError(409, `Accessory "${request.name}" is not available`, {
         item: request.name,
