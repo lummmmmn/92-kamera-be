@@ -350,17 +350,22 @@ function buildPricingFromData(
   const subtotalBreakdown = calculateSubtotal(request, catalog.cameras, catalog.accessories);
   const deliveryFee = resolveDeliveryFee(request, catalog.deliveryFees);
   const discountResult = applyDiscounts(request, discounts, subtotalBreakdown.subtotal, deliveryFee);
-  const discountAmt = discountResult.rentalDiscountAmt + discountResult.deliveryDiscountAmt;
+  const discountAmt = discountResult.rentalDiscountAmt + discountResult.deliveryDiscountAmt + discountResult.totalDiscountAmt;
 
   return {
     ...subtotalBreakdown,
     deliveryFee,
     rentalDiscountAmt: discountResult.rentalDiscountAmt,
     deliveryDiscountAmt: discountResult.deliveryDiscountAmt,
+    totalDiscountAmt: discountResult.totalDiscountAmt,
     discountAmt,
     total: Math.max(
       0,
-      subtotalBreakdown.subtotal - discountResult.rentalDiscountAmt + deliveryFee - discountResult.deliveryDiscountAmt,
+      subtotalBreakdown.subtotal -
+        discountResult.rentalDiscountAmt +
+        deliveryFee -
+        discountResult.deliveryDiscountAmt -
+        discountResult.totalDiscountAmt,
     ),
     appliedDiscounts: discountResult.appliedDiscounts,
   };
