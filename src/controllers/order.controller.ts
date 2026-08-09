@@ -110,7 +110,8 @@ function normalizeLegacyOrder(body: KvRecord, existingOrders: BookingOrder[], fa
   const appliedDiscounts = Array.isArray(body.appliedDiscounts)
     ? body.appliedDiscounts.filter(isRecord).map((item) => ({
         code: optionalString(item.code).toUpperCase(),
-        scope: item.scope === "delivery" ? "delivery" as const : "rental" as const,
+        scope:
+          item.scope === "delivery" ? ("delivery" as const) : item.scope === "total" ? ("total" as const) : ("rental" as const),
         amt: numberOr(item.amt, 0),
       }))
     : fallback?.appliedDiscounts || [];
@@ -135,6 +136,7 @@ function normalizeLegacyOrder(body: KvRecord, existingOrders: BookingOrder[], fa
     discountAmt: numberOr(body.discountAmt ?? fallback?.discountAmt, 0),
     rentalDiscountAmt: numberOr(body.rentalDiscountAmt ?? fallback?.rentalDiscountAmt, 0),
     deliveryDiscountAmt: numberOr(body.deliveryDiscountAmt ?? fallback?.deliveryDiscountAmt, 0),
+    totalDiscountAmt: numberOr(body.totalDiscountAmt ?? fallback?.totalDiscountAmt, 0),
     appliedDiscounts,
     total: numberOr(body.total ?? fallback?.total, numberOr(body.subtotal ?? fallback?.subtotal, 0)),
     deliveryFee: numberOr(body.deliveryFee ?? fallback?.deliveryFee, 0),
