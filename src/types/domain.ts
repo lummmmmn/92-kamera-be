@@ -86,7 +86,8 @@ export type BookingOrder = {
   discountAmt: number;
   rentalDiscountAmt: number;
   deliveryDiscountAmt: number;
-  appliedDiscounts: Array<{ code: string; scope: "rental" | "delivery"; amt: number }>;
+  totalDiscountAmt?: number;
+  appliedDiscounts: Array<{ code: string; scope: "rental" | "delivery" | "total"; amt: number }>;
   total: number;
   deliveryFee: number;
   name: string;
@@ -148,7 +149,7 @@ export type AppliedDiscount = {
   code: string;
   type: "percent" | "fixed";
   value: number;
-  scope: "rental" | "delivery";
+  scope: "rental" | "delivery" | "total";
   discountAmt: number;
 };
 
@@ -159,6 +160,7 @@ export type PricingBreakdown = {
   deliveryFee: number;
   rentalDiscountAmt: number;
   deliveryDiscountAmt: number;
+  totalDiscountAmt: number;
   discountAmt: number;
   total: number;
   appliedDiscounts: AppliedDiscount[];
