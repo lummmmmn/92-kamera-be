@@ -151,6 +151,7 @@ export const orderSchema: ModelSchema = {
     discountAmt: number,
     rentalDiscountAmt: number,
     deliveryDiscountAmt: number,
+    totalDiscountAmt: number,
     appliedDiscounts: unknownArray,
     total: requiredNumber,
     deliveryFee: number,
