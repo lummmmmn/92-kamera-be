@@ -135,6 +135,7 @@ export function applyDiscounts(
   appliedDiscounts: AppliedDiscount[];
   rentalDiscountAmt: number;
   deliveryDiscountAmt: number;
+  totalDiscountAmt: number;
 } {
   const codes = normalizeDiscountCodes(request.discountCodes);
   const appliedDiscounts: AppliedDiscount[] = [];
@@ -149,15 +150,26 @@ export function applyDiscounts(
       throw new HttpError(400, `Discount code "${code}" requires minimum order ${discount.minOrder}`);
     }
 
-    const scope = discount.voucherScope === "delivery" ? "delivery" : "rental";
+    const scope = (discount as { totalScope?: boolean }).totalScope
+      ? "total"
+      : discount.voucherScope === "delivery"
+        ? "delivery"
+        : "rental";
+
     if (appliedDiscounts.some((item) => item.scope === scope)) {
       throw new HttpError(400, `Only one ${scope} discount can be used`);
+    }
+    if (scope === "total" && appliedDiscounts.length > 0) {
+      throw new HttpError(400, `Discount code "${code}" cannot be combined with other discounts`);
+    }
+    if (scope !== "total" && appliedDiscounts.some((item) => item.scope === "total")) {
+      throw new HttpError(400, `A total-order discount is already applied — cannot add "${code}"`);
     }
     if (scope === "delivery" && deliveryFee <= 0) {
       throw new HttpError(400, `Discount code "${code}" requires delivery fee`);
     }
 
-    const base = scope === "delivery" ? deliveryFee : subtotal;
+    const base = scope === "delivery" ? deliveryFee : scope === "total" ? subtotal + deliveryFee : subtotal;
     const rawAmount = discount.type === "percent" ? Math.round((base * discount.value) / 100) : discount.value;
     const discountAmt = Math.min(Math.max(0, rawAmount), base);
 
@@ -179,6 +191,9 @@ export function applyDiscounts(
     deliveryDiscountAmt: appliedDiscounts
       .filter((item) => item.scope === "delivery")
       .reduce((sum, item) => sum + item.discountAmt, 0),
+    totalDiscountAmt: appliedDiscounts
+      .filter((item) => item.scope === "total")
+      .reduce((sum, item) => sum + item.discountAmt, 0),
   };
 }
 
@@ -187,15 +202,23 @@ export async function estimatePricing(repo: Repository, request: BookingRequest)
   const subtotalBreakdown = calculateSubtotal(request, catalog.cameras, catalog.accessories);
   const deliveryFee = resolveDeliveryFee(request, catalog.deliveryFees);
   const discounts = applyDiscounts(request, catalog.discounts, subtotalBreakdown.subtotal, deliveryFee);
-  const discountAmt = discounts.rentalDiscountAmt + discounts.deliveryDiscountAmt;
+  const discountAmt = discounts.rentalDiscountAmt + discounts.deliveryDiscountAmt + discounts.totalDiscountAmt;
 
   return {
     ...subtotalBreakdown,
     deliveryFee,
     rentalDiscountAmt: discounts.rentalDiscountAmt,
     deliveryDiscountAmt: discounts.deliveryDiscountAmt,
+    totalDiscountAmt: discounts.totalDiscountAmt,
     discountAmt,
-    total: Math.max(0, subtotalBreakdown.subtotal - discounts.rentalDiscountAmt + deliveryFee - discounts.deliveryDiscountAmt),
+    total: Math.max(
+      0,
+      subtotalBreakdown.subtotal -
+        discounts.rentalDiscountAmt +
+        deliveryFee -
+        discounts.deliveryDiscountAmt -
+        discounts.totalDiscountAmt,
+    ),
     appliedDiscounts: discounts.appliedDiscounts,
   };
 }
