@@ -26,7 +26,14 @@ import {
 } from "../utils/date.js";
 import { HttpError } from "../utils/httpError.js";
 import { getCatalogData } from "./catalog.service.js";
-import { applyDiscounts, calculateSubtotal, pricingInternals, resolveDeliveryFee } from "./pricing.service.js";
+import {
+  applyDiscounts,
+  calculateSubtotal,
+  pricingInternals,
+  resolveDeliveryFee,
+  type DiscountContact,
+  type DiscountContext,
+} from "./pricing.service.js";
 import { arrayOrEmpty, casJsonValue, getJsonValue, getJsonValueWithMeta } from "./storage.service.js";
 
 const ACTIVE_ORDER_STATUSES = new Set(["pending", "confirmed", "active"]);
@@ -342,14 +349,30 @@ function validateAvailabilityCa(
 
 // ─── Pricing ──────────────────────────────────────────────────────────────────
 
+// Đơn theo ca: subtotal phải tính theo SỐ CA (giá/3 × số ca) ngay từ bước tính giảm giá,
+// nếu không % giảm và minOrder sẽ bị tính trên subtotal theo ngày → lệch với tiền thật của đơn.
+function withCaSubtotal(
+  request: BookingRequest,
+  breakdown: Pick<PricingBreakdown, "cameras" | "accessories" | "subtotal">,
+): Pick<PricingBreakdown, "cameras" | "accessories" | "subtotal"> {
+  const rental = requireRentalCa(request);
+  const totalCa = countCa(rental.ngayNhan, rental.gioNhan, rental.soNgay, rental.gioTra);
+  const subtotal =
+    breakdown.cameras.reduce((sum, c) => sum + tinhTienTheoCa(totalCa, c.unitPrice) * c.qty, 0) +
+    breakdown.accessories.reduce((sum, a) => sum + tinhTienTheoCa(totalCa, a.unitPrice) * a.qty, 0);
+  return { ...breakdown, subtotal };
+}
+
 function buildPricingFromData(
   request: BookingRequest,
   catalog: { cameras: Camera[]; accessories: Accessory[]; deliveryFees: Array<{ name: string; fee: number }> },
   discounts: Discount[],
+  ctx: DiscountContext = {},
 ): PricingBreakdown {
-  const subtotalBreakdown = calculateSubtotal(request, catalog.cameras, catalog.accessories);
+  const baseBreakdown = calculateSubtotal(request, catalog.cameras, catalog.accessories);
+  const subtotalBreakdown = isCaBasedRequest(request) ? withCaSubtotal(request, baseBreakdown) : baseBreakdown;
   const deliveryFee = resolveDeliveryFee(request, catalog.deliveryFees);
-  const discountResult = applyDiscounts(request, discounts, subtotalBreakdown.subtotal, deliveryFee);
+  const discountResult = applyDiscounts(request, discounts, subtotalBreakdown.subtotal, deliveryFee, ctx);
   const discountAmt = discountResult.rentalDiscountAmt + discountResult.deliveryDiscountAmt + discountResult.totalDiscountAmt;
 
   return {
@@ -371,7 +394,7 @@ function buildPricingFromData(
   };
 }
 
-async function rollbackDiscountUsage(repo: Repository, discountIds: Id[]): Promise<void> {
+export async function rollbackDiscountUsage(repo: Repository, discountIds: Id[]): Promise<void> {
   for (const discountId of discountIds) {
     for (let tries = 0; tries < 3; tries += 1) {
       const meta = await getJsonValueWithMeta<Discount[]>(repo, STORE_KEYS.discounts);
@@ -387,14 +410,130 @@ async function rollbackDiscountUsage(repo: Repository, discountIds: Id[]): Promi
   }
 }
 
+// Cộng/trừ usedCount theo MÃ (dùng khi đổi trạng thái / xoá đơn). CAS + retry để không ghi đè nhau.
+async function adjustDiscountUsageByCodes(repo: Repository, codes: string[], delta: 1 | -1): Promise<void> {
+  const wanted = new Set(codes.map((code) => String(code).trim().toUpperCase()).filter(Boolean));
+  if (wanted.size === 0) return;
+
+  for (let tries = 0; tries < 5; tries += 1) {
+    const meta = await getJsonValueWithMeta<Discount[]>(repo, STORE_KEYS.discounts);
+    const discounts = arrayOrEmpty<Discount>(meta.value);
+    let changed = false;
+    const next = discounts.map((discount) => {
+      if (!wanted.has(String(discount.code || "").toUpperCase())) return discount;
+      changed = true;
+      return { ...discount, usedCount: Math.max(0, (discount.usedCount || 0) + delta) };
+    });
+    if (!changed) return;
+
+    const result = await casJsonValue(repo, STORE_KEYS.discounts, next, meta.updatedAt);
+    if (result.ok) return;
+  }
+}
+
+export function orderDiscountCodes(order: Pick<BookingOrder, "appliedDiscounts" | "discountCode">): string[] {
+  const applied = Array.isArray(order.appliedDiscounts) ? order.appliedDiscounts.map((item) => item.code) : [];
+  const raw = applied.length > 0 ? applied : order.discountCode ? [order.discountCode] : [];
+  return Array.from(new Set(raw.map((code) => String(code).trim().toUpperCase()).filter(Boolean)));
+}
+
+// Quy tắc duy nhất: đơn "cancelled" thì KHÔNG chiếm lượt mã; đơn khác thì có.
+// Gọi mỗi khi trạng thái đơn đổi (hoặc đơn bị xoá → truyền nextStatus = "cancelled").
+export async function syncDiscountUsageOnStatusChange(
+  repo: Repository,
+  order: Pick<BookingOrder, "status" | "appliedDiscounts" | "discountCode">,
+  nextStatus: string,
+): Promise<void> {
+  const wasCancelled = order.status === "cancelled";
+  const willCancel = nextStatus === "cancelled";
+  if (wasCancelled === willCancel) return;
+  await adjustDiscountUsageByCodes(repo, orderDiscountCodes(order), willCancel ? -1 : 1);
+}
+
+export type LegacyDiscountPricing = {
+  appliedDiscounts: Array<{ code: string; scope: "rental" | "delivery" | "total"; amt: number }>;
+  discountCode: string | null;
+  discountAmt: number;
+  rentalDiscountAmt: number;
+  deliveryDiscountAmt: number;
+  totalDiscountAmt: number;
+  total: number;
+};
+
+// Dùng cho POST /orders (flow FE đang chạy): server tự kiểm tra mã, tự tính lại số tiền giảm + total,
+// và TĂNG usedCount bằng CAS (không tin bất kỳ con số giảm giá nào client gửi lên).
+export async function reserveLegacyOrderDiscounts(
+  repo: Repository,
+  input: {
+    codes: string[];
+    subtotal: number;
+    deliveryFee: number;
+    days: number;
+    orders: BookingOrder[];
+    contact: DiscountContact;
+  },
+): Promise<{ pricing: LegacyDiscountPricing; reservedIds: Id[] }> {
+  const subtotal = Math.max(0, input.subtotal);
+  const deliveryFee = Math.max(0, input.deliveryFee);
+
+  const toPricing = (
+    applied: Array<{ code: string; scope: "rental" | "delivery" | "total"; discountAmt: number }>,
+  ): LegacyDiscountPricing => {
+    const sum = (scope: string) =>
+      applied.filter((item) => item.scope === scope).reduce((acc, item) => acc + item.discountAmt, 0);
+    const rentalDiscountAmt = sum("rental");
+    const deliveryDiscountAmt = sum("delivery");
+    const totalDiscountAmt = sum("total");
+    const primary =
+      applied.find((item) => item.scope === "rental") ||
+      applied.find((item) => item.scope === "delivery") ||
+      applied.find((item) => item.scope === "total");
+    return {
+      appliedDiscounts: applied.map((item) => ({ code: item.code, scope: item.scope, amt: item.discountAmt })),
+      discountCode: primary?.code || null,
+      discountAmt: rentalDiscountAmt + deliveryDiscountAmt + totalDiscountAmt,
+      rentalDiscountAmt,
+      deliveryDiscountAmt,
+      totalDiscountAmt,
+      total: Math.max(0, subtotal - rentalDiscountAmt + deliveryFee - deliveryDiscountAmt - totalDiscountAmt),
+    };
+  };
+
+  if (input.codes.length === 0) return { pricing: toPricing([]), reservedIds: [] };
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const meta = await getJsonValueWithMeta<Discount[]>(repo, STORE_KEYS.discounts);
+    const liveDiscounts = arrayOrEmpty<Discount>(meta.value);
+    const result = applyDiscounts({ discountCodes: input.codes }, liveDiscounts, subtotal, deliveryFee, {
+      days: input.days,
+      orders: input.orders,
+      contact: input.contact,
+    });
+
+    const nextDiscounts = liveDiscounts.map((discount) =>
+      result.appliedDiscounts.some((item) => pricingInternals.sameId(item.id, discount.id))
+        ? { ...discount, usedCount: (discount.usedCount || 0) + 1 }
+        : discount,
+    );
+
+    const saved = await casJsonValue(repo, STORE_KEYS.discounts, nextDiscounts, meta.updatedAt);
+    if (saved.ok) {
+      return { pricing: toPricing(result.appliedDiscounts), reservedIds: result.appliedDiscounts.map((item) => item.id) };
+    }
+  }
+
+  throw new HttpError(409, "Mã giảm giá đang được nhiều người dùng cùng lúc, vui lòng thử lại.");
+}
+
 async function reserveDiscounts(
   repo: Repository,
   request: BookingRequest,
   catalog: { cameras: Camera[]; accessories: Accessory[]; deliveryFees: Array<{ name: string; fee: number }> },
+  ctx: DiscountContext = {},
 ): Promise<{ pricing: PricingBreakdown; reservedIds: Id[] }> {
   const requestedCodes = request.discountCodes || [];
   if (requestedCodes.length === 0) {
-    return { pricing: buildPricingFromData(request, catalog, []), reservedIds: [] };
+    return { pricing: buildPricingFromData(request, catalog, [], ctx), reservedIds: [] };
   }
 
   const reservedIds: Id[] = [];
@@ -403,7 +542,7 @@ async function reserveDiscounts(
     for (let reserveAttempt = 0; reserveAttempt < 5; reserveAttempt += 1) {
       const meta = await getJsonValueWithMeta<Discount[]>(repo, STORE_KEYS.discounts);
       const liveDiscounts = arrayOrEmpty<Discount>(meta.value);
-      const pricing = buildPricingFromData(request, catalog, liveDiscounts);
+      const pricing = buildPricingFromData(request, catalog, liveDiscounts, ctx);
 
       const nextDiscounts = liveDiscounts.map((discount) => {
         const used = pricing.appliedDiscounts.find((item) => pricingInternals.sameId(item.id, discount.id));
@@ -417,7 +556,7 @@ async function reserveDiscounts(
       }
     }
 
-    throw new HttpError(409, "Discount codes are being used concurrently. Please try again.");
+    throw new HttpError(409, "Mã giảm giá đang được nhiều người dùng cùng lúc, vui lòng thử lại.");
   } catch (error) {
     await rollbackDiscountUsage(repo, reservedIds);
     throw error;
@@ -438,13 +577,8 @@ function buildOrderCa(
 
   const totalCa = countCa(rental.ngayNhan, rental.gioNhan, rental.soNgay, rental.gioTra);
 
-  // Override subtotal theo ca — tính đủ cho TỪNG camera (theo qty) và TỪNG phụ
-  // kiện, rồi cộng dồn. Trước đây chỗ này chỉ lấy giá của firstCamera.unitPrice
-  // để tính cho toàn bộ đơn (bỏ qua số lượng, các camera khác, và mọi phụ kiện)
-  // → đơn thuê nhiều máy/phụ kiện qua flow ca-based bị tính tiền thiếu rất nhiều.
-  const tongTienCa =
-    pricing.cameras.reduce((sum, c) => sum + tinhTienTheoCa(totalCa, c.unitPrice) * c.qty, 0) +
-    pricing.accessories.reduce((sum, a) => sum + tinhTienTheoCa(totalCa, a.unitPrice) * a.qty, 0);
+  // pricing.subtotal đã được tính theo ca (xem withCaSubtotal) và mã giảm giá cũng tính trên số này.
+  const tongTienCa = pricing.subtotal;
 
   const deliveryType = request.delivery?.type === "selfPickup" ? "selfPickup" : request.delivery?.ward ? "delivery" : "";
   const address =
@@ -493,7 +627,7 @@ function buildOrderCa(
     rentalDiscountAmt: pricing.rentalDiscountAmt,
     deliveryDiscountAmt: pricing.deliveryDiscountAmt,
     appliedDiscounts,
-    total: Math.max(0, tongTienCa - pricing.discountAmt + pricing.deliveryFee - pricing.deliveryDiscountAmt),
+    total: pricing.total,
     deliveryFee: pricing.deliveryFee,
 
     ...customer,
@@ -546,7 +680,7 @@ function buildOrderLegacy(
     rentalDiscountAmt: pricing.rentalDiscountAmt,
     deliveryDiscountAmt: pricing.deliveryDiscountAmt,
     appliedDiscounts,
-    total: Math.max(0, pricing.subtotal - pricing.rentalDiscountAmt + pricing.deliveryFee - pricing.deliveryDiscountAmt),
+    total: pricing.total,
     session: rental.session,
     shift: rental.days === 0.5 && rental.session !== "full" ? rental.session : null,
     createdAt: new Date().toISOString(),
@@ -567,19 +701,20 @@ function buildOrderLegacy(
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function createBooking(repo: Repository, request: BookingRequest): Promise<BookingOrder> {
-  requireCustomer(request);
+  const customer = requireCustomer(request);
 
   const useCa = isCaBasedRequest(request);
-  if (useCa) {
-    requireRentalCa(request);
-  } else {
-    requireRentalLegacy(request);
-  }
+  const rentalDays = useCa ? requireRentalCa(request).soNgay : requireRentalLegacy(request).days;
 
   const catalog = await getCatalogData(repo);
+  const discountCtx: DiscountContext = {
+    days: rentalDays,
+    orders: arrayOrEmpty<BookingOrder>(await getJsonValue<BookingOrder[]>(repo, STORE_KEYS.orders)),
+    contact: { phone: customer.phone, email: customer.email },
+  };
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const { pricing, reservedIds } = await reserveDiscounts(repo, request, catalog);
+    const { pricing, reservedIds } = await reserveDiscounts(repo, request, catalog, discountCtx);
 
     try {
       const meta = await getJsonValueWithMeta<BookingOrder[]>(repo, STORE_KEYS.orders);
@@ -663,13 +798,7 @@ export async function updateBookingStatus(
     const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
 
     if (result.ok) {
-      if (status === "cancelled" && order.status !== "cancelled" && Array.isArray(order.appliedDiscounts)) {
-        const discounts = arrayOrEmpty<Discount>(await getJsonValue<Discount[]>(repo, STORE_KEYS.discounts));
-        const idsToRollback = discounts
-          .filter((discount) => order.appliedDiscounts.some((applied) => applied.code === discount.code.toUpperCase()))
-          .map((discount) => discount.id);
-        await rollbackDiscountUsage(repo, idsToRollback);
-      }
+      await syncDiscountUsageOnStatusChange(repo, order, status);
       return nextOrder;
     }
   }
