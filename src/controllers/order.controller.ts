@@ -10,11 +10,14 @@ import {
   getAvailableCameraQtyByCa,
   getOrderCaSchedule,
   listBookings,
+  reserveLegacyOrderDiscounts,
+  rollbackDiscountUsage,
+  syncDiscountUsageOnStatusChange,
   updateBookingStatus,
 } from "../services/booking.service.js";
 import { getResourceArray, type KvRecord } from "../services/kvResource.service.js";
 import { arrayOrEmpty, casJsonValue, getJsonValueWithMeta } from "../services/storage.service.js";
-import type { BookingOrder, BookingRequest } from "../types/domain.js";
+import type { BookingOrder, BookingRequest, Id } from "../types/domain.js";
 import { getDateRange } from "../utils/date.js";
 import { requireString } from "../utils/http.js";
 import { HttpError } from "../utils/httpError.js";
@@ -240,6 +243,16 @@ async function validateLegacyAvailability(repo: Awaited<ReturnType<typeof getRep
   }
 }
 
+// Lấy danh sách mã khách đã áp (chỉ lấy CODE — mọi con số giảm giá do server tự tính lại)
+function clientDiscountCodes(body: KvRecord): string[] {
+  const fromApplied = Array.isArray(body.appliedDiscounts)
+    ? body.appliedDiscounts.filter(isRecord).map((item) => optionalString(item.code))
+    : [];
+  const single = optionalString(body.discountCode);
+  const codes = fromApplied.length > 0 ? fromApplied : single ? [single] : [];
+  return codes.filter(Boolean);
+}
+
 function isBookingRequest(body: KvRecord): boolean {
   return isRecord(body.customer) || isRecord(body.rental) || isRecord(body.items);
 }
@@ -287,14 +300,39 @@ export const orderController = {
         return;
       }
 
-      const order = normalizeLegacyOrder(body, orders);
-      await validateLegacyAvailability(repo, order, orders);
+      // Server tự validate mã + tự tính lại tiền giảm/total + tăng usedCount (CAS).
+      // Không tin discountAmt/total/appliedDiscounts.amt do client gửi.
+      let reservedIds: Id[] = [];
+      try {
+        const priced = await reserveLegacyOrderDiscounts(repo, {
+          codes: clientDiscountCodes(body),
+          subtotal: numberOr(body.subtotal, 0),
+          deliveryFee: numberOr(body.deliveryFee, 0),
+          days: numberOr(body.days, 0),
+          orders,
+          contact: {
+            phone: optionalString(body.phone),
+            email: optionalString(body.email),
+            userPhone: optionalString(body.userPhone),
+            userEmail: optionalString(body.userEmail),
+          },
+        });
+        reservedIds = priced.reservedIds;
 
-      const result = await casJsonValue(repo, STORE_KEYS.orders, [order, ...orders], meta.updatedAt);
-      if (result.ok) {
-        res.status(201).json(order);
-        return;
+        const order = normalizeLegacyOrder({ ...body, ...priced.pricing }, orders);
+        await validateLegacyAvailability(repo, order, orders);
+
+        const result = await casJsonValue(repo, STORE_KEYS.orders, [order, ...orders], meta.updatedAt);
+        if (result.ok) {
+          res.status(201).json(order);
+          return;
+        }
+      } catch (error) {
+        await rollbackDiscountUsage(repo, reservedIds);
+        throw error;
       }
+      // CAS đơn hàng thất bại → trả lại lượt mã vừa giữ rồi thử lại từ đầu
+      await rollbackDiscountUsage(repo, reservedIds);
       // Có đơn khác vừa ghi song song trong lúc mình đang lưu → đọc lại data mới nhất, validate lại từ đầu rồi thử tiếp
     }
 
@@ -395,6 +433,7 @@ export const orderController = {
       const nextOrders = orders.map((item) => (item.id === id ? nextOrder : item));
       const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
       if (result.ok) {
+        await syncDiscountUsageOnStatusChange(repo, current, nextOrder.status);
         res.json(nextOrder);
         return;
       }
@@ -466,6 +505,7 @@ export const orderController = {
       const nextOrders = orders.filter((item) => String(item.id) !== id);
       const result = await casJsonValue(repo, STORE_KEYS.orders, nextOrders, meta.updatedAt);
       if (result.ok) {
+        await syncDiscountUsageOnStatusChange(repo, order, "cancelled");
         res.json(order);
         return;
       }
