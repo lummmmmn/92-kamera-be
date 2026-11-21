@@ -146,6 +146,20 @@ export async function updateResource(
   return next;
 }
 
+export async function removeResourcesWhere(
+  repo: Repository,
+  config: ResourceConfig,
+  predicate: (item: KvRecord) => boolean,
+): Promise<number> {
+  let removed = 0;
+  await casUpdateArray(repo, config.key, (items) => {
+    const kept = items.filter((item) => !predicate(item));
+    removed = items.length - kept.length;
+    return kept;
+  });
+  return removed;
+}
+
 export async function deleteResource(repo: Repository, config: ResourceConfig, id: string): Promise<KvRecord> {
   const idField = getIdField(config);
 
