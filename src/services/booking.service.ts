@@ -286,7 +286,7 @@ function validateAvailabilityLegacy(
   for (const item of request.items?.accessories || []) {
     const accessory = catalog.accessories.find((acc) => {
       if (item.id !== undefined && acc.id !== undefined && pricingInternals.sameId(acc.id, item.id)) return true;
-      return !!item.name && acc.name === item.name;
+      return !!item.name && String(acc.name ?? "").trim() === String(item.name).trim();
     });
     if (!accessory) throw new HttpError(400, `Accessory ${item.id ?? item.name ?? ""} was not found`);
 
