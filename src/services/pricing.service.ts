@@ -38,7 +38,7 @@ function findCamera(cameras: Camera[], item: BookingItemInput): Camera {
 function findAccessory(accessories: Accessory[], item: BookingItemInput): Accessory {
   const accessory = accessories.find((acc) => {
     if (item.id !== undefined && acc.id !== undefined && sameId(acc.id, item.id)) return true;
-    return !!item.name && acc.name === item.name;
+    return !!item.name && String(acc.name ?? "").trim() === String(item.name).trim();
   });
 
   if (!accessory) throw new HttpError(400, `Accessory ${item.id ?? item.name ?? ""} was not found`);
