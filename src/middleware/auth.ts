@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { PUBLIC_WRITE_KEYS } from "../config/storeKeys.js";
+import { PRIVATE_READ_KEYS, PUBLIC_WRITE_KEYS } from "../config/storeKeys.js";
 import { verifyAdminToken, verifyToken, type TokenPayload } from "../services/auth.service.js";
 import { HttpError } from "../utils/httpError.js";
 
@@ -30,6 +30,10 @@ export function requireAdmin(req: Request): void {
 export function requireWriteAccess(req: Request, key: string): void {
   if (PUBLIC_WRITE_KEYS.has(key)) return;
   requireAdmin(req);
+}
+
+export function requireReadAccess(req: Request, key: string): void {
+  if (PRIVATE_READ_KEYS.has(key)) requireAdmin(req);
 }
 
 export function authenticate(req: Request, _res: Response, next: NextFunction): void {
