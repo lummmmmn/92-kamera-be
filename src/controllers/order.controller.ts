@@ -217,7 +217,7 @@ async function validateLegacyAvailability(repo: Awaited<ReturnType<typeof getRep
   }
 
   for (const request of accessoryRequests(order)) {
-    const accessory = accessories.find((item) => item.name === request.name);
+    const accessory = accessories.find((item) => String(item.name ?? "").trim() === String(request.name ?? "").trim());
     if (!accessory) throw new HttpError(400, `Accessory ${request.name} was not found`);
     const minAvailable = useCaCheck
       ? Math.min(
