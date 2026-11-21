@@ -2,6 +2,7 @@ import type {
   Accessory,
   AppliedDiscount,
   BookingItemInput,
+  BookingOrder,
   BookingRequest,
   Camera,
   DeliveryFee,
@@ -9,8 +10,10 @@ import type {
   PricingBreakdown,
 } from "../types/domain.js";
 import type { Repository } from "../types/repository.js";
+import { STORE_KEYS } from "../config/storeKeys.js";
 import { HttpError } from "../utils/httpError.js";
 import { getCatalogData } from "./catalog.service.js";
+import { arrayOrEmpty, getJsonValue } from "./storage.service.js";
 
 function asNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
@@ -112,6 +115,60 @@ export function calculateSubtotal(
   return { cameras: selectedCameras, accessories: selectedAccessories, subtotal };
 }
 
+// ─── Ngữ cảnh kiểm tra mã giảm giá (minDays / hạng khách) ────────────────────
+export type DiscountContact = { phone?: string; email?: string; userPhone?: string; userEmail?: string };
+
+export type DiscountContext = {
+  /** Số ngày thuê của đơn — dùng cho điều kiện minDays */
+  days?: number;
+  /** Toàn bộ đơn hiện có — dùng để tính hạng khách (requiredBadge) */
+  orders?: BookingOrder[];
+  /** Thông tin liên hệ khách — để khớp đơn cũ của khách */
+  contact?: DiscountContact;
+};
+
+function normalizePhone(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const digits = value.replace(/\D/g, "");
+  return digits.startsWith("84") && digits.length === 11 ? `0${digits.slice(2)}` : digits;
+}
+
+function normalizeEmail(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+type CustomerStats = { orderCount: number; totalDays: number; totalSpent: number };
+
+function computeCustomerStats(orders: BookingOrder[], contact: DiscountContact): CustomerStats {
+  const phones = [contact.phone, contact.userPhone].map(normalizePhone).filter(Boolean);
+  const emails = [contact.email, contact.userEmail].map(normalizeEmail).filter(Boolean);
+  const stats: CustomerStats = { orderCount: 0, totalDays: 0, totalSpent: 0 };
+  if (phones.length === 0 && emails.length === 0) return stats;
+
+  for (const order of orders) {
+    if (order.status === "cancelled") continue;
+    const orderPhones = [order.phone, order.userPhone].map(normalizePhone).filter(Boolean);
+    const orderEmails = [order.email, order.userEmail].map(normalizeEmail).filter(Boolean);
+    const matched = phones.some((p) => orderPhones.includes(p)) || emails.some((e) => orderEmails.includes(e));
+    if (!matched) continue;
+
+    stats.orderCount += 1;
+    stats.totalDays += asNumber(order.days, 0);
+    stats.totalSpent += asNumber(order.total, 0);
+  }
+  return stats;
+}
+
+// Phải khớp với logic hạng khách ở frontend (useBooking.js)
+const BADGE_RULES: Record<string, { label: string; ok: (s: CustomerStats) => boolean }> = {
+  dong: { label: "Khách Đồng (cần 1+ đơn)", ok: (s) => s.orderCount >= 1 },
+  bac: { label: "Khách Bạc (cần 3+ đơn)", ok: (s) => s.orderCount >= 3 },
+  vang: { label: "Khách Vàng (cần 5+ đơn)", ok: (s) => s.orderCount >= 5 },
+  daigiadagia: { label: "Đại Gia (cần 30+ ngày thuê)", ok: (s) => s.totalDays >= 30 },
+  vip: { label: "Khách VIP (cần chi 5,000,000đ+)", ok: (s) => s.totalSpent >= 5_000_000 },
+  kimcuong: { label: "Kim Cương (cần chi 10,000,000đ+)", ok: (s) => s.totalSpent >= 10_000_000 },
+};
+
 function normalizeDiscountCodes(codes: unknown): string[] {
   if (!Array.isArray(codes)) return [];
 
@@ -131,6 +188,7 @@ export function applyDiscounts(
   discounts: Discount[],
   subtotal: number,
   deliveryFee: number,
+  ctx: DiscountContext = {},
 ): {
   appliedDiscounts: AppliedDiscount[];
   rentalDiscountAmt: number;
@@ -142,12 +200,26 @@ export function applyDiscounts(
 
   for (const code of codes) {
     const discount = discounts.find((item) => item.code.toUpperCase() === code && item.active === true);
-    if (!discount) throw new HttpError(400, `Discount code "${code}" is invalid or disabled`);
+    if (!discount) throw new HttpError(400, `Mã "${code}" không tồn tại hoặc đã bị tắt`);
     if (discount.maxUse && (discount.usedCount || 0) >= discount.maxUse) {
-      throw new HttpError(409, `Discount code "${code}" has reached its usage limit`);
+      throw new HttpError(409, `Mã "${code}" đã dùng hết số lượt`);
     }
     if (discount.minOrder && subtotal < discount.minOrder) {
-      throw new HttpError(400, `Discount code "${code}" requires minimum order ${discount.minOrder}`);
+      throw new HttpError(400, `Mã "${code}" yêu cầu đơn tối thiểu ${discount.minOrder.toLocaleString("vi-VN")}đ`);
+    }
+
+    const minDays = asNumber(discount.minDays, 0);
+    if (minDays > 0 && asNumber(ctx.days, 0) < minDays) {
+      throw new HttpError(400, `Mã "${code}" yêu cầu thuê tối thiểu ${minDays} ngày`);
+    }
+
+    const requiredBadge = typeof discount.requiredBadge === "string" ? discount.requiredBadge : "none";
+    if (requiredBadge && requiredBadge !== "none") {
+      const rule = BADGE_RULES[requiredBadge];
+      const stats = computeCustomerStats(ctx.orders || [], ctx.contact || {});
+      if (!rule || !rule.ok(stats)) {
+        throw new HttpError(400, `Mã "${code}" chỉ dành cho ${rule ? rule.label : "hạng khách đặc biệt"}`);
+      }
     }
 
     const scope = (discount as { totalScope?: boolean }).totalScope
@@ -157,16 +229,16 @@ export function applyDiscounts(
         : "rental";
 
     if (appliedDiscounts.some((item) => item.scope === scope)) {
-      throw new HttpError(400, `Only one ${scope} discount can be used`);
+      throw new HttpError(400, `Mỗi loại chỉ được dùng 1 mã (${scope})`);
     }
     if (scope === "total" && appliedDiscounts.length > 0) {
-      throw new HttpError(400, `Discount code "${code}" cannot be combined with other discounts`);
+      throw new HttpError(400, `Mã "${code}" (giảm tổng đơn) không dùng chung với mã khác`);
     }
     if (scope !== "total" && appliedDiscounts.some((item) => item.scope === "total")) {
-      throw new HttpError(400, `A total-order discount is already applied — cannot add "${code}"`);
+      throw new HttpError(400, `Đang dùng mã giảm tổng đơn — không thể thêm mã "${code}"`);
     }
     if (scope === "delivery" && deliveryFee <= 0) {
-      throw new HttpError(400, `Discount code "${code}" requires delivery fee`);
+      throw new HttpError(400, `Mã "${code}" chỉ áp dụng khi đơn có phí giao nhận`);
     }
 
     const base = scope === "delivery" ? deliveryFee : scope === "total" ? subtotal + deliveryFee : subtotal;
@@ -201,7 +273,12 @@ export async function estimatePricing(repo: Repository, request: BookingRequest)
   const catalog = await getCatalogData(repo);
   const subtotalBreakdown = calculateSubtotal(request, catalog.cameras, catalog.accessories);
   const deliveryFee = resolveDeliveryFee(request, catalog.deliveryFees);
-  const discounts = applyDiscounts(request, catalog.discounts, subtotalBreakdown.subtotal, deliveryFee);
+  const orders = arrayOrEmpty<BookingOrder>(await getJsonValue<BookingOrder[]>(repo, STORE_KEYS.orders));
+  const discounts = applyDiscounts(request, catalog.discounts, subtotalBreakdown.subtotal, deliveryFee, {
+    days: asNumber(request.rental?.soNgay ?? request.rental?.days, 0),
+    orders,
+    contact: { phone: request.customer?.phone, email: request.customer?.email },
+  });
   const discountAmt = discounts.rentalDiscountAmt + discounts.deliveryDiscountAmt + discounts.totalDiscountAmt;
 
   return {
