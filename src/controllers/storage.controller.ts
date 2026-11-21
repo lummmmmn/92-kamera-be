@@ -1,11 +1,12 @@
 import type { Request, Response } from "express";
-import { requireWriteAccess } from "../middleware/auth.js";
+import { requireReadAccess, requireWriteAccess } from "../middleware/auth.js";
 import { getRepository } from "../repositories/index.js";
 import { parseStoredJson, requireBodyValue, requireString } from "../utils/http.js";
 
 export const storageController = {
   async get(req: Request, res: Response) {
     const key = requireString(req.query.key, "key");
+    requireReadAccess(req, key);
     const repo = await getRepository();
     const row = await repo.getKv(key);
 
@@ -20,6 +21,7 @@ export const storageController = {
 
   async getMeta(req: Request, res: Response) {
     const key = requireString(req.query.key, "key");
+    requireReadAccess(req, key);
     const repo = await getRepository();
     const row = await repo.getKv(key);
 
