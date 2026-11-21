@@ -19,6 +19,7 @@ import { healthRouter } from "./health.routes.js";
 import { pricingRouter } from "./pricing.routes.js";
 import { storageRouter } from "./storage.routes.js";
 import { uploadRouter } from "./upload.routes.js";
+import { wishRouter } from "./wish.routes.js";
 
 export const apiRouter = Router();
 
@@ -40,3 +41,4 @@ apiRouter.use("/photos", photoRouter);
 apiRouter.use("/albums", albumRouter);
 apiRouter.use("/delivery-fees", deliveryFeeRouter);
 apiRouter.use("/users", userRouter);
+apiRouter.use("/wishes", wishRouter);
