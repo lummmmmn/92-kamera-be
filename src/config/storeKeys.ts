@@ -8,7 +8,13 @@ export const STORE_KEYS = {
   discounts: "k92_discounts_v1",
   albums: "k92_albums_v1",
   deliveryFees: "k92_delivery_fees_v1",
+  wishes: "k92_wishes_v1",
+  wishSocks: "k92_wish_socks_v1",
 } as const;
+
+// Key chứa dữ liệu riêng tư (SĐT khách trong điều ước): GET /storage cho key này
+// bắt buộc token admin. Nếu không, ai cũng đọc được qua /api/storage?key=...
+export const PRIVATE_READ_KEYS = new Set<string>([STORE_KEYS.wishes]);
 
 // Endpoint /storage là generic KV read/write, KHÔNG đi qua schema validation hay
 // business logic (availability check, discount rule, giá tiền...) như các route
